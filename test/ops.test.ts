@@ -42,6 +42,16 @@ describe('GET /health', () => {
     assert.equal(res.status, 503);
     assert.deepEqual(await res.json(), { status: 'unavailable' });
   });
+
+  test('a burst of probes spends a single query', async () => {
+    let queries = 0;
+    const pool = { query: async () => { queries++; } } as unknown as pg.Pool;
+    const app = createApp(pool, keys);
+    const answers = await Promise.all(Array.from({ length: 20 }, () => app.request('/health')));
+    assert.ok(answers.every((r) => r.status === 200));
+    assert.equal((await app.request('/health')).status, 200);
+    assert.equal(queries, 1);
+  });
 });
 
 describe('migrate', () => {

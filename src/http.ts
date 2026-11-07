@@ -14,6 +14,7 @@ import { jsonWithin, stripHiddenDeep } from './secrets.ts';
 import { BridgeError, cancelTask, createTask, finishTask, getEvents, getTask } from './tasks.ts';
 
 const sha = (s: string) => createHash('sha256').update(s).digest();
+const HEALTH_CACHE_MS = 30_000;
 const MAX_TASK_INPUT_BYTES = 64 * 1024;
 const MAX_TASK_OUTPUT_BYTES = 1024 * 1024; // Same as the body limit: this one exists to bound the depth.
 const MIN_CRON_SECRET = 32;
@@ -69,13 +70,13 @@ export function createApp(pool: Pool, keys: Record<string, string>, options: App
   mountActivation(app);
 
   // Before auth on purpose: the host probes it without a key, so it says only up or down.
+  // Cached so a keyless flood cannot drain the pool or keep spending Hobby quota on queries.
+  let health: { until: number; ok: Promise<boolean> } | undefined;
   app.get('/health', async (c) => {
-    try {
-      await pool.query('SELECT 1');
-      return c.json({ status: 'ok' });
-    } catch {
-      return c.json({ status: 'unavailable' }, 503);
+    if (!health || Date.now() >= health.until) {
+      health = { until: Date.now() + HEALTH_CACHE_MS, ok: pool.query('SELECT 1').then(() => true, () => false) };
     }
+    return await health.ok ? c.json({ status: 'ok' }) : c.json({ status: 'unavailable' }, 503);
   });
 
   // Before auth: pg_cron is no agent, and an idle tick must not spend a query on an agent row.
