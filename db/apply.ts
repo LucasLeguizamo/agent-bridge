@@ -2,13 +2,14 @@
 // One-shot, for a new project only. Everything after 001 goes through db/migrate.ts.
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
+import { connectionConfig } from '../src/db.ts';
 
 const { ADMIN_DATABASE_URL: url, BRIDGE_DB_PASSWORD: password } = process.env;
 if (!url) throw new Error('ADMIN_DATABASE_URL is required');
 if (!password || !/^[0-9a-f]{32,}$/.test(password)) throw new Error('BRIDGE_DB_PASSWORD must be 32+ hex characters');
 
 const file = (name: string) => readFileSync(new URL(name, import.meta.url), 'utf8');
-const client = new pg.Client({ connectionString: url });
+const client = new pg.Client(connectionConfig(url, 'ADMIN_DATABASE_URL', process.env.DATABASE_CA_PEM));
 await client.connect();
 try {
   await client.query(`

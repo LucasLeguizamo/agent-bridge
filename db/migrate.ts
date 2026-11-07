@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import { connectionConfig } from '../src/db.ts';
 
 const DB_DIR = fileURLToPath(new URL('.', import.meta.url));
 const LOCK_ID = 7240301; // Arbitrary, only has to be stable: serializes concurrent runners.
@@ -75,7 +76,7 @@ export async function migrate(client: pg.ClientBase, schema = 'bridge', dir = DB
 if (import.meta.main) {
   const url = process.env.ADMIN_DATABASE_URL;
   if (!url) throw new Error('ADMIN_DATABASE_URL is required');
-  const client = new pg.Client({ connectionString: url });
+  const client = new pg.Client(connectionConfig(url, 'ADMIN_DATABASE_URL', process.env.DATABASE_CA_PEM));
   await client.connect();
   try {
     const { baselined, applied } = await migrate(client);
