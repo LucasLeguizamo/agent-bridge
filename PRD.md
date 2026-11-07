@@ -4,7 +4,7 @@ Memoria compartida e invocación asíncrona entre agentes siempre activos: Insti
 
 | | |
 |---|---|
-| Estado | Borrador. Bloqueado en D1, G1 y G2 (sección 12) |
+| Estado | En ejecución: M1. M3 y M4 bloqueadas en G1 y G2 (sección 12) |
 | Fecha | 7-nov-2026 |
 | Dueño | Lucas |
 | Código y claves | En inglés. El PRD va en español |
@@ -127,7 +127,7 @@ flowchart LR
 
 **Stack:** TypeScript sobre Node 24, Hono, `pg` sin ORM, Zod. Un proceso en un contenedor, en cualquier host Docker con reinicio automático. El proveedor de correo entrante se elige en M3 y el host en M6.
 
-**Base de datos:** una instancia nueva y dedicada. **Nunca la de FreeTicket.** El dispatcher consulta cada pocos segundos, así que no cuentes con ahorro por scale-to-zero.
+**Base de datos:** Supabase, en un proyecto nuevo y dedicado. **Nunca el de FreeTicket.** El dispatcher consulta cada pocos segundos, así que no cuentes con ahorro por pausa o scale-to-zero. El código debe funcionar por el pooler en modo transacción: nada de `SET` de sesión ni `LISTEN`, y `SKIP LOCKED` dentro de una transacción corta. Los tests corren contra un Postgres local desechable.
 
 ## 6. Datos y ciclo de vida
 
@@ -377,7 +377,7 @@ Es la parte más delicada. Conectar dos agentes con acceso a tus cuentas crea un
 | G0 | ¿Cuál es el segundo agente? **Grok Bot** | Resuelto | Nada |
 | G1 | ¿Instinct responde por correo a un puente automatizado? | Lucas, con las pruebas | M3 |
 | G2 | ¿Las routines de Grok Bot funcionan por webhook y MCP sin nadie presente? | Lucas, con las pruebas | M4 |
-| D1 | ¿Se aprueba Postgres solo en v1, en vez de Redis? | Lucas | M1 |
+| D1 | ¿Postgres solo en v1, en vez de Redis? **Aprobado, sobre Supabase** (7-nov-2026) | Resuelto | Nada |
 
 M1 y M2 no dependen de ningún agente externo. Si G1 falla, siguen sirviendo para Grok Bot, Claude Code y futuros agentes.
 
