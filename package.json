@@ -6,8 +6,9 @@
     "node": ">=24 <25"
   },
   "scripts": {
-    "start": "node src/main.ts",
-    "test": "node --test --test-timeout=60000 test/core.test.ts",
+    "start": "node --env-file-if-exists=.env.local src/main.ts",
+    "db:apply": "node --env-file-if-exists=.env.local db/apply.ts",
+    "test": "node --env-file-if-exists=.env.local --test --test-timeout=180000 test/core.test.ts",
     "typecheck": "tsc"
   },
   "dependencies": {

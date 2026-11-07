@@ -3,7 +3,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import pg from 'pg';
 import { runOnce, type Adapters } from '../src/queue.ts';
 
-const pool = new pg.Pool({ connectionString: process.argv[2]! });
+const pool = new pg.Pool({ connectionString: process.env.WORKER_DATABASE_URL!, max: 3 });
 const adapters: Adapters = {
   fake: {
     async deliver(task) {

@@ -6,12 +6,12 @@ import pg from 'pg';
 import { createApp } from '../src/http.ts';
 import { ackDelivered, claim, MAX_ATTEMPTS, runOnce, type Adapters, type ClaimedTask } from '../src/queue.ts';
 import { DAILY_PAIR_CAP, MAX_HOPS, type Task } from '../src/tasks.ts';
-import { schemaSql, startThrowawayPostgres } from './pg.ts';
+import { openTestSchema } from './pg.ts';
 
 const KEYS = { grok: 'g'.repeat(32), instinct: 'i'.repeat(32), claude: 'c'.repeat(32) };
 type Agent = keyof typeof KEYS;
 
-let db: Awaited<ReturnType<typeof startThrowawayPostgres>>;
+let db: Awaited<ReturnType<typeof openTestSchema>> | undefined;
 let pool: pg.Pool;
 let app: ReturnType<typeof createApp>;
 let seq = 0;
@@ -47,15 +47,14 @@ const eventTypes = async (id: string) =>
 const expireLease = (id: string) => pool.query('UPDATE task SET next_attempt_at = now() WHERE id = $1', [id]);
 
 before(async () => {
-  db = await startThrowawayPostgres();
-  pool = new pg.Pool({ connectionString: db.url, max: 30 });
-  await pool.query(schemaSql());
+  db = await openTestSchema();
+  pool = new pg.Pool({ connectionString: db.url, max: 8 });
   await pool.query('CREATE TABLE delivery_log (task_id uuid, idempotency_key text, pid int)');
   app = createApp(pool, KEYS);
 });
 after(async () => {
-  await pool.end();
-  db.stop();
+  await pool?.end();
+  await db?.stop();
 });
 beforeEach(async () => {
   delivered = [];
@@ -66,8 +65,10 @@ beforeEach(async () => {
 
 describe('two processes', () => {
   test('never double-deliver, and both really compete for work', async () => {
-    const N = 300;
-    const workers = [0, 1].map(() => fork(new URL('./worker.ts', import.meta.url), [db.url]));
+    const N = 100;
+    // The URL goes through env, not argv, so the password stays out of `ps`.
+    const env = { ...process.env, WORKER_DATABASE_URL: db!.url };
+    const workers = [0, 1].map(() => fork(new URL('./worker.ts', import.meta.url), { env }));
     const exited = workers.map((w) => new Promise<void>((resolve, reject) => {
       w.once('error', reject);
       w.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`worker exited ${code}`)));

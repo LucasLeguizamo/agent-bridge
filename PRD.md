@@ -127,7 +127,7 @@ flowchart LR
 
 **Stack:** TypeScript sobre Node 24, Hono, `pg` sin ORM, Zod. Un proceso en un contenedor, en cualquier host Docker con reinicio automático. El proveedor de correo entrante se elige en M3 y el host en M6.
 
-**Base de datos:** Supabase, en un proyecto nuevo y dedicado. **Nunca el de FreeTicket.** El dispatcher consulta cada pocos segundos, así que no cuentes con ahorro por pausa o scale-to-zero. El código debe funcionar por el pooler en modo transacción: nada de `SET` de sesión ni `LISTEN`, y `SKIP LOCKED` dentro de una transacción corta. Los tests corren contra un Postgres local desechable.
+**Base de datos:** Supabase, en un proyecto nuevo y dedicado. **Nunca el de FreeTicket.** El dispatcher consulta cada pocos segundos, así que no cuentes con ahorro por pausa o scale-to-zero. El código debe funcionar por el pooler en modo transacción: nada de `SET` de sesión ni `LISTEN`, y `SKIP LOCKED` dentro de una transacción corta. Las tablas viven en el schema privado `bridge`, fuera de la API de datos de Supabase, y la app entra con el rol `bridge_app`, de permisos mínimos y `search_path` fijo. Nunca se levanta Postgres en local: los tests corren en Supabase, cada corrida en un schema temporal propio que se borra al terminar.
 
 ## 6. Datos y ciclo de vida
 

@@ -1,33 +1,43 @@
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { createServer } from 'node:net';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import pg from 'pg';
 
-const freePort = () => new Promise<number>((resolve, reject) => {
-  const s = createServer();
-  s.once('error', reject);
-  s.listen(0, '127.0.0.1', () => {
-    const { port } = s.address() as { port: number };
-    s.close(() => resolve(port));
-  });
-});
+/**
+ * Every run gets its own schema in Supabase and drops it afterwards, so tests cannot reach real tables,
+ * even though they TRUNCATE. It needs a session-mode or direct URL: a transaction pooler cannot pin search_path.
+ * ponytail: a crashed run leaves its test_* schema behind; drop those by hand.
+ */
+export async function openTestSchema() {
+  const raw = process.env.TEST_DATABASE_URL;
+  if (!raw) throw new Error('TEST_DATABASE_URL is required (Supabase session pooler or direct connection)');
+  const url = new URL(raw);
+  if (!/\.supabase\.(co|com)$/.test(url.hostname)) throw new Error('TEST_DATABASE_URL must point to Supabase');
+  if (!url.searchParams.get('sslmode')) throw new Error('TEST_DATABASE_URL must set sslmode');
 
-/** Disposable local cluster in a temp dir. It deliberately ignores DATABASE_URL: tests can only touch this one. */
-export async function startThrowawayPostgres() {
-  const dir = mkdtempSync(join(tmpdir(), 'agent-bridge-pg-'));
-  const data = join(dir, 'data');
-  const port = await freePort();
-  execFileSync('initdb', ['-D', data, '-U', 'postgres', '-A', 'trust', '-E', 'UTF8', '--no-sync'], { stdio: 'ignore' });
-  const opts = `-p ${port} -c listen_addresses=127.0.0.1 -c unix_socket_directories='' -c fsync=off`;
-  execFileSync('pg_ctl', ['-D', data, '-w', '-l', join(dir, 'log'), '-o', opts, 'start'], { stdio: 'ignore' });
-  return {
-    url: `postgres://postgres@127.0.0.1:${port}/postgres`,
-    stop() {
-      execFileSync('pg_ctl', ['-D', data, '-m', 'immediate', '-w', 'stop'], { stdio: 'ignore' });
-      rmSync(dir, { recursive: true, force: true });
-    },
+  const schema = `test_${randomBytes(8).toString('hex')}`;
+  const admin = new pg.Client({ connectionString: raw });
+  await admin.connect();
+  await admin.query(`CREATE SCHEMA ${schema}`);
+
+  url.searchParams.set('options', `-c search_path=${schema}`);
+  const scoped = url.toString();
+  const drop = async () => {
+    await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+    await admin.end();
   };
-}
 
-export const schemaSql = () => readFileSync(new URL('../db/001_core.sql', import.meta.url), 'utf8');
+  // Checked before any test runs: without it, TRUNCATE would hit whatever schema the connection defaults to.
+  const probe = new pg.Client({ connectionString: scoped });
+  try {
+    await probe.connect();
+    const { rows: [r] } = await probe.query<{ s: string }>('SELECT current_schema() AS s');
+    if (r!.s !== schema) throw new Error('search_path not applied; use a session pooler or direct URL');
+    await probe.query(readFileSync(new URL('../db/001_core.sql', import.meta.url), 'utf8'));
+  } catch (e) {
+    await drop();
+    throw e;
+  } finally {
+    await probe.end();
+  }
+  return { url: scoped, stop: drop };
+}
