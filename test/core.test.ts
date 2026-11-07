@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { fork } from 'node:child_process';
+import { fork, spawnSync } from 'node:child_process';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import pg from 'pg';
 import { createApp } from '../src/http.ts';
-import { ackDelivered, claim, MAX_ATTEMPTS, runOnce, type Adapters, type ClaimedTask } from '../src/queue.ts';
+import { ackDelivered, claim, MAX_ATTEMPTS, nackDelivery, runOnce, type Adapters, type ClaimedTask } from '../src/queue.ts';
 import { DAILY_PAIR_CAP, MAX_HOPS, type Task } from '../src/tasks.ts';
 import { openTestSchema } from './pg.ts';
 
@@ -39,7 +39,7 @@ async function call(agent: Agent | null, method: string, path: string, body?: un
 
 const newTask = (over: Record<string, unknown> = {}) => {
   seq++;
-  return { to_agent: 'instinct', intent: 'research', input: { n: seq }, idempotency_key: `k${seq}`, ...over };
+  return { to_agent: 'instinct', intent: 'research', input: { query: `q${seq}` }, idempotency_key: `k${seq}`, ...over };
 };
 const create = (from: Agent, over: Record<string, unknown> = {}) => call(from, 'POST', '/tasks', newTask(over));
 const eventTypes = async (id: string) =>
@@ -135,9 +135,9 @@ describe('idempotent retries', () => {
   test('same key with different content is a conflict; other agents have their own key space', async () => {
     const payload = newTask();
     await call('grok', 'POST', '/tasks', payload);
-    const conflict = await call('grok', 'POST', '/tasks', { ...payload, input: { other: true } });
+    const conflict = await call('grok', 'POST', '/tasks', { ...payload, input: { query: 'other' } });
     assert.equal(conflict.status, 409);
-    const other = await call('claude', 'POST', '/tasks', { ...payload, input: { mine: true } });
+    const other = await call('claude', 'POST', '/tasks', { ...payload, input: { query: 'mine' } });
     assert.equal(other.status, 201);
   });
 
@@ -303,7 +303,7 @@ describe('loop guards', () => {
   });
 
   test('breaker holds work already queued for the paused pair, and releases when it ends', async () => {
-    const queued = await create('grok', { input: { queued: true } });
+    const queued = await create('grok', { input: { query: 'queued' } });
     await pool.query(
       `INSERT INTO pair_pause VALUES ('grok', 'instinct', now() + interval '1 hour', 'test')`);
     assert.equal(await runOnce(pool, adapters), 0);
@@ -316,7 +316,7 @@ describe('loop guards', () => {
   });
 
   test('duplicate content within an hour is rejected under a new key, and allowed after', async () => {
-    const input = { same: true };
+    const input = { query: 'same' };
     assert.equal((await create('grok', { input })).status, 201);
     const dup = await create('grok', { input });
     assert.equal(dup.status, 422);
@@ -377,11 +377,11 @@ describe('states', () => {
 
   test('cancel: only the sender, and not after close', async () => {
     const { body: { task } } = await create('grok');
-    assert.equal((await call('instinct', 'POST', `/tasks/${task.id}/cancel`)).status, 409);
+    assert.equal((await call('instinct', 'POST', `/tasks/${task.id}/cancel`)).status, 404, 'undelivered: hidden from receiver');
     assert.equal((await call('grok', 'POST', `/tasks/${task.id}/cancel`)).status, 200);
     assert.equal((await call('grok', 'POST', `/tasks/${task.id}/cancel`)).status, 200, 'idempotent');
     assert.equal(await runOnce(pool, adapters), 0, 'canceled work is not delivered');
-    assert.equal((await call('instinct', 'POST', `/tasks/${task.id}/complete`, { output: {} })).status, 409);
+    assert.equal((await call('instinct', 'POST', `/tasks/${task.id}/complete`, { output: {} })).status, 404);
   });
 });
 
@@ -416,11 +416,185 @@ describe('http boundary', () => {
     assert.equal((await create('grok', { to_agent: 'ghost' })).status, 422);
     assert.equal((await create('grok', { to_agent: 'grok' })).status, 422);
     assert.equal((await create('grok', { input: 'not-an-object' })).status, 400);
-    assert.equal((await create('grok', { input: { bad: '\u0000' } })).status, 400);
+    assert.equal((await create('grok', { input: { query: '\u0000' } })).status, 400);
     assert.equal((await call('grok', 'GET', '/tasks/not-a-uuid')).status, 404);
     const res = await app.request('/tasks', {
       method: 'POST', headers: { authorization: `Bearer ${KEYS.grok}` }, body: '{broken',
     });
     assert.equal(res.status, 400);
+  });
+});
+
+describe('audit fixes', () => {
+  test('low-risk intent with extra fields is side_effect, and never delivered', async () => {
+    const r = await create('grok', { input: { query: 'x', action: 'send payment' } });
+    assert.equal(r.body.task.risk, 'side_effect');
+    assert.equal(r.body.task.state, 'input_required');
+    assert.equal(await runOnce(pool, adapters), 0);
+  });
+
+  test('receiver cannot read a task, or its events, until it is delivered', async () => {
+    const { body: { task } } = await create('grok', { intent: 'send.payment', input: { to: 'x' } });
+    assert.equal((await call('instinct', 'GET', `/tasks/${task.id}`)).status, 404);
+    assert.equal((await call('instinct', 'GET', `/tasks/${task.id}/events`)).status, 404);
+    assert.equal((await call('grok', 'GET', `/tasks/${task.id}`)).status, 200);
+  });
+
+  test('omitting parent_id does not reset hops: ping-pong still stops', async () => {
+    const sides: Agent[] = ['grok', 'instinct'];
+    const hops: number[] = [];
+    for (let i = 0; i < MAX_HOPS; i++) {
+      const r = await create(sides[i % 2]!, { to_agent: sides[(i + 1) % 2] });
+      assert.equal(r.status, 201);
+      hops.push(r.body.task.hop);
+      await runOnce(pool, adapters);
+    }
+    assert.deepEqual(hops, [0, 1, 2, 3]);
+    const over = await create('grok');
+    assert.deepEqual(over.body.task.output, { rejected: 'hop_limit' });
+    assert.equal(delivered.length, MAX_HOPS);
+    assert.equal(new Set(delivered.map((t) => t.root_id)).size, 1, 'one conversation');
+  });
+
+  test('routing through a third agent does not reset hops', async () => {
+    const a = await create('grok', { to_agent: 'instinct' });
+    await runOnce(pool, adapters);
+    const b = await create('instinct', { to_agent: 'claude' });
+    assert.equal(b.body.task.hop, 1);
+    assert.equal(b.body.task.root_id, a.body.task.root_id);
+  });
+
+  test('a task received long ago and already closed starts a new chain', async () => {
+    const { body: { task } } = await create('grok');
+    await runOnce(pool, adapters);
+    await call('instinct', 'POST', `/tasks/${task.id}/complete`, { output: {} });
+    await pool.query(`UPDATE task SET created_at = now() - interval '16 minutes'`);
+    assert.equal((await create('instinct', { to_agent: 'grok' })).body.task.hop, 0);
+  });
+
+  test('a replay without parent_id still matches a task given an implicit parent', async () => {
+    await create('grok');
+    await runOnce(pool, adapters);
+    const payload = newTask({ to_agent: 'grok' });
+    const a = await call('instinct', 'POST', '/tasks', payload);
+    assert.ok(a.body.task.parent_id);
+    assert.equal((await call('instinct', 'POST', '/tasks', payload)).status, 200);
+  });
+
+  test('parent must have been delivered; uppercase parent id is the same id', async () => {
+    const undelivered = await create('grok');
+    assert.equal((await create('instinct', { to_agent: 'grok', parent_id: undelivered.body.task.id })).status, 422);
+    await runOnce(pool, adapters);
+    const r = await create('instinct', { to_agent: 'grok', parent_id: undelivered.body.task.id.toUpperCase() });
+    assert.equal(r.body.task.parent_id, undelivered.body.task.id);
+  });
+
+  test('disabling the sender holds its queued work', async () => {
+    await create('grok');
+    await pool.query(`UPDATE agent SET enabled = false WHERE id = 'grok'`);
+    assert.equal(await runOnce(pool, adapters), 0);
+  });
+
+  test('adapter errors stay out of the API and in the audit log', async () => {
+    const { body: { task } } = await create('grok');
+    failNext = 1;
+    await runOnce(pool, adapters);
+    const { body } = await call('grok', 'GET', `/tasks/${task.id}/events`);
+    assert.ok(body.events!.some((e) => e.type === 'delivery_failed'));
+    assert.ok(!JSON.stringify(body.events).includes('receiver down'));
+    const { rows } = await pool.query(`SELECT payload FROM event WHERE type = 'delivery_failed'`);
+    assert.equal(rows[0].payload.error, 'receiver down');
+  });
+
+  test('stored rejections are capped per sender', async () => {
+    const input = { query: 'same' };
+    await create('grok', { input });
+    await pool.query(
+      `INSERT INTO task (root_id, from_agent, to_agent, intent, input, risk, state, idempotency_key, deadline_at)
+       SELECT gen_random_uuid(), 'grok', 'instinct', 'research', '{}', 'read', 'rejected', 'r-' || n, now()
+       FROM generate_series(1, 100) n`);
+    const before = (await pool.query('SELECT 1 FROM task')).rowCount;
+    assert.equal((await create('grok', { input })).status, 429);
+    assert.equal((await pool.query('SELECT 1 FROM task')).rowCount, before);
+  });
+
+  test('rejected tasks do not count against the daily cap', async () => {
+    const input = { query: 'same' };
+    await create('grok', { input });
+    for (let i = 0; i < DAILY_PAIR_CAP; i++) assert.equal((await create('grok', { input })).status, 422);
+    assert.equal((await create('grok')).status, 201);
+  });
+
+  test('replaying a rejected task still answers 422', async () => {
+    const input = { query: 'same' };
+    await create('grok', { input });
+    const payload = newTask({ input });
+    assert.equal((await call('grok', 'POST', '/tasks', payload)).status, 422);
+    assert.equal((await call('grok', 'POST', '/tasks', payload)).status, 422);
+  });
+
+  test('same key toward another agent is a conflict', async () => {
+    const payload = newTask();
+    await call('grok', 'POST', '/tasks', payload);
+    assert.equal((await call('grok', 'POST', '/tasks', { ...payload, to_agent: 'claude' })).status, 409);
+  });
+
+  test('an adapter ignoring the signal cannot stall the dispatcher', async () => {
+    const { body: { task } } = await create('grok');
+    const stuck: Adapters = { fake: { deliver: () => new Promise(() => {}) } };
+    await runOnce(pool, stuck, 50);
+    const { rows: [t] } = await pool.query<Task>('SELECT * FROM task WHERE id = $1', [task.id]);
+    assert.equal(t!.state, 'submitted');
+    assert.deepEqual((await eventTypes(task.id)).at(-1), 'delivery_failed');
+  });
+
+  test('stale nacks change nothing', async () => {
+    const { body: { task } } = await create('grok');
+    const [stale] = await claim(pool, adapters);
+    await expireLease(task.id);
+    await claim(pool, adapters);
+    const lease = async () => (await pool.query<Task>('SELECT * FROM task WHERE id = $1', [task.id])).rows[0]!;
+    const before = await lease();
+    await nackDelivery(pool, stale!, 'old');
+    assert.deepEqual((await lease()).next_attempt_at, before.next_attempt_at);
+    await nackDelivery(pool, { id: task.id, attempts: MAX_ATTEMPTS }, 'old');
+    assert.equal((await lease()).state, 'submitted', 'a final nack from another attempt does not fail it');
+  });
+
+  test('receiver can fail a delivered task, but not one still undelivered', async () => {
+    const { body: { task } } = await create('grok');
+    assert.equal((await call('instinct', 'POST', `/tasks/${task.id}/fail`, { output: {} })).status, 404);
+    await runOnce(pool, adapters);
+    const r = await call('instinct', 'POST', `/tasks/${task.id}/fail`, { output: { why: 'no' } });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.task.state, 'failed');
+  });
+
+  test('oversized body gets 413 only after auth', async () => {
+    const body = JSON.stringify({ input: 'x'.repeat(1024 * 1024 + 1) });
+    const anon = await app.request('/tasks', { method: 'POST', body, headers: { 'content-length': String(body.length) } });
+    assert.equal(anon.status, 401);
+    const authed = await app.request('/tasks', {
+      method: 'POST', body, headers: { authorization: `Bearer ${KEYS.grok}`, 'content-length': String(body.length) },
+    });
+    assert.equal(authed.status, 413);
+  });
+
+  test('main.ts fails on bad env without printing secrets', () => {
+    const boot = (env: Record<string, string>) => spawnSync(process.execPath, ['src/main.ts'], {
+      cwd: new URL('..', import.meta.url), encoding: 'utf8', env: { PATH: process.env.PATH!, ...env },
+    });
+    const url = 'postgresql://u:SECRETPW@h.supabase.com:6543/postgres';
+    const noTls = boot({ DATABASE_URL: url, BRIDGE_AGENT_KEYS: '{}' });
+    assert.notEqual(noTls.status, 0);
+    assert.match(noTls.stderr, /sslmode/);
+    assert.ok(!noTls.stderr.includes('SECRETPW'));
+    const badKeys = boot({ DATABASE_URL: `${url}?sslmode=require`, BRIDGE_AGENT_KEYS: '{"grok":"SECRETKEY' });
+    assert.notEqual(badKeys.status, 0);
+    assert.ok(!badKeys.stderr.includes('SECRETKEY'));
+    assert.ok(!badKeys.stderr.includes('SECRETPW'));
+    const badUrl = boot({ DATABASE_URL: 'SECRETPW-not-a-url', BRIDGE_AGENT_KEYS: '{}' });
+    assert.notEqual(badUrl.status, 0);
+    assert.ok(!badUrl.stderr.includes('SECRETPW'));
   });
 });

@@ -21,8 +21,9 @@ export async function claim(pool: Pool, adapters: Adapters, limit = 10) {
     `WITH due AS (
        SELECT t.id FROM task t
        JOIN agent a ON a.id = t.to_agent
+       JOIN agent s ON s.id = t.from_agent
        WHERE t.state = 'submitted' AND t.next_attempt_at <= now()
-         AND t.attempts < $1 AND a.enabled AND a.adapter = ANY($2)
+         AND t.attempts < $1 AND a.enabled AND s.enabled AND a.adapter = ANY($2)
          AND NOT EXISTS (
            SELECT 1 FROM pair_pause p
            WHERE p.agent_a = LEAST(t.from_agent, t.to_agent)
@@ -105,12 +106,17 @@ export async function sweep(pool: Pool) {
 }
 
 /** One dispatcher pass. Returns how many tasks it claimed. */
-export async function runOnce(pool: Pool, adapters: Adapters) {
+export async function runOnce(pool: Pool, adapters: Adapters, timeoutMs = DELIVERY_TIMEOUT_MS) {
   await sweep(pool);
   const tasks = await claim(pool, adapters);
   await Promise.all(tasks.map(async (t) => {
     try {
-      await adapters[t.adapter]!.deliver(t, AbortSignal.timeout(DELIVERY_TIMEOUT_MS));
+      const signal = AbortSignal.timeout(timeoutMs);
+      // Raced, so an adapter that ignores the signal cannot stall the dispatcher or outlive its lease.
+      await Promise.race([
+        adapters[t.adapter]!.deliver(t, signal),
+        new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason))),
+      ]);
     } catch (e) {
       await nackDelivery(pool, t, e instanceof Error ? e.message : String(e));
       return;

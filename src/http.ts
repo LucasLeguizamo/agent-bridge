@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import { HTTPException } from 'hono/http-exception';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { BridgeError, cancelTask, createTask, finishTask, getEvents, getTask } from './tasks.ts';
@@ -13,7 +14,7 @@ const NewTaskBody = z.strictObject({
   intent: z.string().min(1).max(100),
   input: z.record(z.string(), z.unknown()),
   idempotency_key: z.string().min(1).max(200),
-  parent_id: z.uuid().optional(),
+  parent_id: z.uuid().toLowerCase().optional(),
 });
 const OutputBody = z.strictObject({ output: z.record(z.string(), z.unknown()) });
 const TaskId = z.uuid();
@@ -22,8 +23,6 @@ const TaskId = z.uuid();
 export function createApp(pool: Pool, keys: Record<string, string>) {
   const entries = Object.entries(keys).map(([agent, key]) => [agent, sha(key)] as const);
   const app = new Hono<{ Variables: { agent: string } }>();
-
-  app.use(bodyLimit({ maxSize: 1024 * 1024 }));
 
   app.use(async (c, next) => {
     const token = c.req.header('authorization')?.match(/^Bearer (.+)$/)?.[1];
@@ -35,6 +34,8 @@ export function createApp(pool: Pool, keys: Record<string, string>) {
     c.set('agent', agent);
     await next();
   });
+
+  app.use(bodyLimit({ maxSize: 1024 * 1024 }));
 
   const parse = async <T>(schema: z.ZodType<T>, req: { json(): Promise<unknown> }) => {
     const r = schema.safeParse(await req.json().catch(() => undefined));
@@ -49,8 +50,8 @@ export function createApp(pool: Pool, keys: Record<string, string>) {
 
   app.post('/tasks', async (c) => {
     const { task, created } = await createTask(pool, c.get('agent'), await parse(NewTaskBody, c.req));
-    if (!created) return c.json({ task }, 200);
-    return c.json({ task }, task.state === 'rejected' ? 422 : 201);
+    if (task.state === 'rejected') return c.json({ task }, 422);
+    return c.json({ task }, created ? 201 : 200);
   });
   app.get('/tasks/:id', async (c) =>
     c.json({ task: await getTask(pool, idOf(c.req.param('id')), c.get('agent')) }));
@@ -69,6 +70,7 @@ export function createApp(pool: Pool, keys: Record<string, string>) {
 
   app.onError((e, c) => {
     if (e instanceof BridgeError) return c.json({ error: e.message }, e.status);
+    if (e instanceof HTTPException) return c.json({ error: 'request_rejected' }, e.status);
     // Postgres rejects these in jsonb/text (for example \u0000): bad input, not a server fault.
     const code = (e as { code?: string }).code;
     if (code === '22P05' || code === '22021') return c.json({ error: 'invalid_body' }, 400);
