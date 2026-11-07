@@ -1,0 +1,136 @@
+import type { Pool } from 'pg';
+import type { Json, Task } from './tasks.ts';
+
+export const MAX_ATTEMPTS = 5;
+// The lease must outlast the delivery timeout, so a live delivery is never re-claimed.
+const LEASE_SECONDS = 60;
+const DELIVERY_TIMEOUT_MS = 30_000;
+const BACKOFF_BASE_SECONDS = 30;
+
+export type ClaimedTask = Task & { adapter: string; agent_config: Json };
+export type Adapter = { deliver(task: ClaimedTask, signal: AbortSignal): Promise<void> };
+export type Adapters = Record<string, Adapter>;
+
+/**
+ * Atomically leases due tasks: one statement, so the lock lasts only as long as a short transaction.
+ * Delivery happens after commit. A crash leaves the task `submitted`, and it is retried when the lease ends.
+ * Tasks for agents with no loaded adapter stay queued instead of burning attempts.
+ */
+export async function claim(pool: Pool, adapters: Adapters, limit = 10) {
+  const { rows } = await pool.query<ClaimedTask>(
+    `WITH due AS (
+       SELECT t.id FROM task t
+       JOIN agent a ON a.id = t.to_agent
+       WHERE t.state = 'submitted' AND t.next_attempt_at <= now()
+         AND t.attempts < $1 AND a.enabled AND a.adapter = ANY($2)
+         AND NOT EXISTS (
+           SELECT 1 FROM pair_pause p
+           WHERE p.agent_a = LEAST(t.from_agent, t.to_agent)
+             AND p.agent_b = GREATEST(t.from_agent, t.to_agent)
+             AND p.paused_until > now())
+       ORDER BY t.next_attempt_at
+       LIMIT $3
+       FOR UPDATE OF t SKIP LOCKED
+     ), claimed AS (
+       UPDATE task t SET attempts = t.attempts + 1, next_attempt_at = now() + make_interval(secs => $4)
+       FROM due WHERE t.id = due.id
+       RETURNING t.*
+     ), ev AS (
+       INSERT INTO event (task_id, actor, type, payload)
+       SELECT id, 'bridge', 'delivery_attempt', jsonb_build_object('attempt', attempts) FROM claimed
+     )
+     SELECT claimed.*, a.adapter, a.config AS agent_config
+     FROM claimed JOIN agent a ON a.id = claimed.to_agent`,
+    [MAX_ATTEMPTS, Object.keys(adapters), limit, LEASE_SECONDS],
+  );
+  return rows;
+}
+
+// `attempts = $2` fences stale acks: a slower attempt cannot overwrite a newer one.
+export async function ackDelivered(pool: Pool, t: Pick<Task, 'id' | 'attempts'>) {
+  await pool.query(
+    `WITH up AS (
+       UPDATE task SET state = 'working'
+       WHERE id = $1 AND attempts = $2 AND state = 'submitted'
+       RETURNING id
+     )
+     INSERT INTO event (task_id, actor, type, payload)
+     SELECT id, 'bridge', 'delivered', jsonb_build_object('attempt', $2::int) FROM up`,
+    [t.id, t.attempts],
+  );
+}
+
+export async function nackDelivery(pool: Pool, t: Pick<Task, 'id' | 'attempts'>, error: string) {
+  const payload = JSON.stringify({ attempt: t.attempts, error: error.slice(0, 500) });
+  if (t.attempts >= MAX_ATTEMPTS) {
+    await pool.query(
+      `WITH up AS (
+         UPDATE task SET state = 'failed', output = '{"error":"delivery_exhausted"}'
+         WHERE id = $1 AND attempts = $2 AND state = 'submitted'
+         RETURNING id
+       )
+       INSERT INTO event (task_id, actor, type, payload)
+       SELECT id, 'bridge', 'alert', $3::jsonb || '{"alert":"delivery_exhausted"}' FROM up`,
+      [t.id, t.attempts, payload],
+    );
+    return;
+  }
+  await pool.query(
+    `WITH up AS (
+       UPDATE task SET next_attempt_at = now() + make_interval(secs => $3)
+       WHERE id = $1 AND attempts = $2 AND state = 'submitted'
+       RETURNING id
+     )
+     INSERT INTO event (task_id, actor, type, payload)
+     SELECT id, 'bridge', 'delivery_failed', $4::jsonb FROM up`,
+    [t.id, t.attempts, BACKOFF_BASE_SECONDS * 2 ** (t.attempts - 1), payload],
+  );
+}
+
+/** Fails overdue tasks, and tasks whose last allowed attempt crashed before it could report. */
+export async function sweep(pool: Pool) {
+  await pool.query(
+    `WITH up AS (
+       UPDATE task SET state = 'failed', output = jsonb_build_object(
+         'error', CASE WHEN deadline_at <= now() THEN 'deadline_exceeded' ELSE 'delivery_exhausted' END)
+       WHERE state IN ('submitted', 'working', 'input_required')
+         AND (deadline_at <= now()
+              OR (state = 'submitted' AND attempts >= $1 AND next_attempt_at <= now()))
+       RETURNING id, output
+     )
+     INSERT INTO event (task_id, actor, type, payload)
+     SELECT id, 'bridge', 'alert', jsonb_build_object('alert', output->>'error') FROM up`,
+    [MAX_ATTEMPTS],
+  );
+}
+
+/** One dispatcher pass. Returns how many tasks it claimed. */
+export async function runOnce(pool: Pool, adapters: Adapters) {
+  await sweep(pool);
+  const tasks = await claim(pool, adapters);
+  await Promise.all(tasks.map(async (t) => {
+    try {
+      await adapters[t.adapter]!.deliver(t, AbortSignal.timeout(DELIVERY_TIMEOUT_MS));
+    } catch (e) {
+      await nackDelivery(pool, t, e instanceof Error ? e.message : String(e));
+      return;
+    }
+    await ackDelivered(pool, t);
+  }));
+  return tasks.length;
+}
+
+export function startDispatcher(pool: Pool, adapters: Adapters, intervalMs = 5000) {
+  let stopped = false;
+  let timer: NodeJS.Timeout;
+  const loop = async () => {
+    try {
+      await runOnce(pool, adapters);
+    } catch (e) {
+      console.error('dispatcher pass failed', e);
+    }
+    if (!stopped) timer = setTimeout(loop, intervalMs);
+  };
+  void loop();
+  return () => { stopped = true; clearTimeout(timer); };
+}
