@@ -96,6 +96,19 @@ const COMMANDS = [
     request: () => ({ method: 'GET', path: '/tasks/pending' }),
   },
   {
+    name: 'tasks get', summary: 'Show a task you sent or were offered: its state and, once closed, its output.',
+    args: ['id'], flags: [],
+    example: 'bridge tasks get 7b0f3c52-6a44-4d1e-9a51-0c7e5c0f1a22',
+    request: ([id]) => ({ method: 'GET', path: `/tasks/${taskId(id)}` }),
+    view: (r) => {
+      const t = taskOf(r);
+      return {
+        data_label: r.body.data_label,
+        task: { id: t.id, from_agent: t.from_agent, to_agent: t.to_agent, intent: t.intent, state: t.state, output: t.output, deadline_at: t.deadline_at },
+      };
+    },
+  },
+  {
     name: 'tasks claim', summary: 'Take a task. Only the first claim gets it; "claimed": false means stop, and exits 0. '
       + 'After exit 6 the claim may have happened, and repeating it answers "claimed": false.',
     args: ['id'], flags: WRITE, write: true,

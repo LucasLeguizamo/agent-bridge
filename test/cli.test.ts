@@ -524,7 +524,7 @@ describe('what comes back is data', () => {
 });
 
 describe('help and version', () => {
-  const commands = [['whoami'], ['tasks', 'pending'], ['tasks', 'claim'], ['tasks', 'complete'], ['tasks', 'create'], ['memory', 'search'], ['memory', 'write']];
+  const commands = [['whoami'], ['tasks', 'pending'], ['tasks', 'get'], ['tasks', 'claim'], ['tasks', 'complete'], ['tasks', 'create'], ['memory', 'search'], ['memory', 'write']];
 
   for (const c of commands) {
     test(`${c.join(' ')} --help has an example, needs nothing set, and leaves stdout to JSON`, async () => {
@@ -550,7 +550,7 @@ describe('help and version', () => {
     assert.match(text.stderr, /Exit codes:/);
     assert.match(text.stderr, /Example:/);
     assert.equal((await cli(['tasks', '--help'])).code, 0);
-    assert.equal((await cli(['tasks', '--help', '--json'])).json.commands.length, 4);
+    assert.equal((await cli(['tasks', '--help', '--json'])).json.commands.length, 5);
   });
 
   test('help never shows the token, and asks for no request', async () => {

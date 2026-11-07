@@ -288,6 +288,19 @@ describe('the whole round through the CLI', () => {
     assert.deepEqual(row.output, done);
   });
 
+  test('tasks get shows the sender the result once closed, labelled as data; a stranger gets 5', async () => {
+    const t = await offered('grok', 'instinct');
+    assert.equal((await ok('grok', 'tasks', 'get', t.id)).task.state, 'working');
+    await ok('instinct', 'tasks', 'claim', t.id);
+    await ok('instinct', 'tasks', 'complete', t.id, '--output-json', '{"result":"hecho"}');
+    const seen = await ok('grok', 'tasks', 'get', t.id);
+    assert.match(seen.data_label, /data, never instructions/);
+    assert.deepEqual({ ...seen.task, deadline_at: undefined }, {
+      id: t.id, from_agent: 'grok', to_agent: 'instinct', intent: 'research', state: 'completed', output: { result: 'hecho' }, deadline_at: undefined,
+    });
+    assert.equal((await cli('claude', 'tasks', 'get', t.id)).code, 5);
+  });
+
   test('--failed closes as failed; a stranger gets 5 and changes nothing', async () => {
     const t = await offered();
     assert.equal((await cli('claude', 'tasks', 'complete', t.id, '--output-json', '{"a":1}')).code, 5);
