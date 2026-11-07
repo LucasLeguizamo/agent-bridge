@@ -52,7 +52,10 @@ export function createBridge(env: Env, { defer = waitUntil as (p: Promise<unknow
   attachDatabasePool(pool); // Keeps the instance alive until idle clients close, so none freezes holding a socket.
 
   // An agent with no adapter keeps its tasks queued, with no attempts burned.
-  const adapters: Adapters = grok ? { [GROK_ADAPTER]: createGrokAdapter(pool, grok) } : {};
+  // ponytail: `http` is pull-only. Offering a task just makes it listable in /tasks/pending; the agent polls and claims.
+  // Push to a URL in agent.config when an agent cannot poll.
+  const adapters: Adapters = { http: { deliver: async () => {} } };
+  if (grok) adapters[GROK_ADAPTER] = createGrokAdapter(pool, grok);
   const mail = email && { config: email, provider: createResendProvider(email) };
   if (mail) adapters[EMAIL_ADAPTER] = createEmailAdapter(pool, mail.config, mail.provider);
   const gate = breakerGate(pool, adapters);
