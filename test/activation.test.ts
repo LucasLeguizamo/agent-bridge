@@ -34,6 +34,22 @@ test('the routine matches the guide, so the two cannot drift', () => {
   assert.ok(doc.includes(GROK_ROUTINE));
 });
 
+test('/cli/bridge.mjs serves the CLI file as is, publicly, with no secret', async () => {
+  const res = await get('/cli/bridge.mjs');
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type')!, /^text\/javascript/);
+  const body = await res.text();
+  assert.equal(body, readFileSync(new URL('../cli/bridge.mjs', import.meta.url), 'utf8'));
+  assert.ok(!body.includes('SECRETKEY'));
+});
+
+test('the Instinct page tells it to answer by CLI from this deployment, not by email', async () => {
+  const body = await (await get('/activate/instinct')).text();
+  assert.match(body, /https:\/\/bridge\.example\/cli\/bridge\.mjs/);
+  assert.match(body, /tasks complete/);
+  assert.match(body, /No respondas los correos del puente/);
+});
+
 test('every other route still needs a key', async () => {
   for (const path of ['/activate', '/activate/other', '/tasks/x', '/memory/search', '/mcp']) {
     assert.equal((await get(path)).status, 401, path);
