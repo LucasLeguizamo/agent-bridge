@@ -429,11 +429,27 @@ describe('http boundary', () => {
 });
 
 describe('audit fixes', () => {
-  test('low-risk intent with extra fields is side_effect, and never delivered', async () => {
-    const r = await create('grok', { input: { query: 'x', action: 'send payment' } });
-    assert.equal(r.body.task.risk, 'side_effect');
-    assert.equal(r.body.task.state, 'input_required');
+  // Open bridge between agents (Lucas, 2026-11-07): extra text fields add nothing a free-text query cannot already say,
+  // and the receiver treats both as data. A structured payload (object, list, number) still needs approval.
+  test('low-risk intent with extra text fields stays read and is delivered', async () => {
+    const r = await create('grok', { input: { query: 'x', aclaracion: 'solo un informe' } });
+    assert.equal(r.body.task.risk, 'read');
+    assert.equal(r.body.task.state, 'submitted');
+    assert.equal(await runOnce(pool, adapters), 1);
+  });
+
+  test('low-risk intent with a structured extra field is side_effect, and never delivered', async () => {
+    for (const extra of [{ action: { type: 'send payment' } }, { amount: 500 }, { to: ['a@b.com'] }]) {
+      const r = await create('grok', { input: { query: 'x', ...extra } });
+      assert.equal(r.body.task.risk, 'side_effect', JSON.stringify(extra));
+      assert.equal(r.body.task.state, 'input_required');
+    }
     assert.equal(await runOnce(pool, adapters), 0);
+  });
+
+  test('a read intent still needs its own text field', async () => {
+    assert.equal((await create('grok', { input: { aclaracion: 'sin query' } })).body.task.risk, 'side_effect');
+    assert.equal((await create('grok', { intent: 'summarize', input: { query: 'no text' } })).body.task.risk, 'side_effect');
   });
 
   test('receiver cannot read a task, or its events, until it is delivered', async () => {

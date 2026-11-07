@@ -41,14 +41,17 @@ export class BridgeError extends Error {
   }
 }
 
-// The sender never picks the risk (PRD section 9). An intent is only low risk with exactly the input shape
-// listed here, so `research` cannot carry extra action fields. Anything else is side_effect.
+// The sender never picks the risk (PRD section 9). An intent is only low risk with the input shape listed here:
+// its own text field plus optional text fields, never a structured action payload. Anything else is side_effect.
 // Limit: free text in `query` can still ask for anything; the receiving agent must treat it as data.
 // ponytail: placeholder allowlist, the PRD names no intents. Extend as adapters land.
 const TEXT = z.string().min(1).max(10_000);
 const INTENT_POLICY = new Map<string, { risk: Task['risk']; input: z.ZodType }>([
-  ['research', { risk: 'read', input: z.strictObject({ query: TEXT }) }],
-  ['summarize', { risk: 'read', input: z.strictObject({ text: TEXT }) }],
+  // Extra text fields are allowed (open bridge between agents): they say nothing a free-text query cannot. Only the
+  // type is checked: {action:"send_payment"} as text stays read. What stops an action is the receiver (data is never
+  // an instruction; Instinct asks Lucas first), not this schema. Objects, lists and numbers make the task side_effect.
+  ['research', { risk: 'read', input: z.object({ query: TEXT }).catchall(TEXT) }],
+  ['summarize', { risk: 'read', input: z.object({ text: TEXT }).catchall(TEXT) }],
   ['memory.write', { risk: 'write', input: z.strictObject({ key: TEXT, value: TEXT }) }],
 ]);
 export const riskOf = (intent: string, input: Json): Task['risk'] => {
