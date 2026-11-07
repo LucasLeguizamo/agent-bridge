@@ -1,5 +1,5 @@
 // Creates the bridge schema and the bridge_app role in one transaction. Fails without changes if they exist.
-// ponytail: one-shot, no migration tracking; add it when M2 brings the second migration.
+// One-shot, for a new project only. Everything after 001 goes through db/migrate.ts.
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
 

@@ -48,7 +48,7 @@ export const riskOf = (intent: string, input: Json): Task['risk'] => {
   return policy?.input.safeParse(input).success ? policy.risk : 'side_effect';
 };
 
-async function tx<T>(pool: Pool, fn: (c: PoolClient) => Promise<T>): Promise<T> {
+export async function tx<T>(pool: Pool, fn: (c: PoolClient) => Promise<T>): Promise<T> {
   const c = await pool.connect();
   let broken: Error | undefined;
   try {

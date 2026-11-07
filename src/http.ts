@@ -1,15 +1,17 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { HTTPException } from 'hono/http-exception';
 import type { Pool } from 'pg';
 import { z } from 'zod';
+import { ContextPackInput, contextPack, memoryEvents, MemoryEventsInput, memoryHistory, MemoryHistoryInput, memoryLog, MemoryLogInput,
+  memorySearch, MemorySearchInput, memoryWrite, MemoryWriteInput } from './memory.ts';
 import { BridgeError, cancelTask, createTask, finishTask, getEvents, getTask } from './tasks.ts';
 
 const sha = (s: string) => createHash('sha256').update(s).digest();
 
 // strict: hop, root_id, risk and from_agent are the bridge's to decide, so sending them is an error.
-const NewTaskBody = z.strictObject({
+export const NewTaskBody = z.strictObject({
   to_agent: z.string().min(1).max(100),
   intent: z.string().min(1).max(100),
   input: z.record(z.string(), z.unknown()),
@@ -23,6 +25,16 @@ const TaskId = z.uuid();
 export function createApp(pool: Pool, keys: Record<string, string>) {
   const entries = Object.entries(keys).map(([agent, key]) => [agent, sha(key)] as const);
   const app = new Hono<{ Variables: { agent: string } }>();
+
+  // Before auth on purpose: the host probes it without a key, so it says only up or down.
+  app.get('/health', async (c) => {
+    try {
+      await pool.query('SELECT 1');
+      return c.json({ status: 'ok' });
+    } catch {
+      return c.json({ status: 'unavailable' }, 503);
+    }
+  });
 
   app.use(async (c, next) => {
     const token = c.req.header('authorization')?.match(/^Bearer (.+)$/)?.[1];
@@ -67,6 +79,22 @@ export function createApp(pool: Pool, keys: Record<string, string>) {
   });
   app.post('/tasks/:id/cancel', async (c) =>
     c.json({ task: await cancelTask(pool, idOf(c.req.param('id')), c.get('agent')) }));
+
+  const fromQuery = (c: Context) => ({ json: async () => c.req.query() as unknown });
+  app.post('/memory/facts', async (c) => {
+    const { fact, created } = await memoryWrite(pool, c.get('agent'), await parse(MemoryWriteInput, c.req));
+    return c.json({ fact }, created ? 201 : 200);
+  });
+  app.get('/memory/facts', async (c) =>
+    c.json({ facts: await memoryHistory(pool, c.get('agent'), await parse(MemoryHistoryInput, fromQuery(c))) }));
+  app.get('/memory/search', async (c) =>
+    c.json({ facts: await memorySearch(pool, c.get('agent'), await parse(MemorySearchInput, fromQuery(c))) }));
+  app.get('/memory/context', async (c) =>
+    c.json(await contextPack(pool, await parse(ContextPackInput, fromQuery(c)))));
+  app.post('/memory/events', async (c) =>
+    c.json({ event: await memoryLog(pool, c.get('agent'), await parse(MemoryLogInput, c.req)) }, 201));
+  app.get('/memory/events', async (c) =>
+    c.json({ events: await memoryEvents(pool, c.get('agent'), await parse(MemoryEventsInput, fromQuery(c))) }));
 
   app.onError((e, c) => {
     if (e instanceof BridgeError) return c.json({ error: e.message }, e.status);

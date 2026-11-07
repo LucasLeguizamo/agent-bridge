@@ -1,0 +1,11 @@
+# Allow-list: anything new in the repo stays out of the image unless named here.
+*
+!package.json
+!pnpm-lock.yaml
+!src/
+
+# Applied after the allow-list, so these win even inside src/.
+**/.env*
+**/*.test.ts
+**/.claude
+**/test

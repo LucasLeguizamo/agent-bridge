@@ -126,12 +126,13 @@ export async function runOnce(pool: Pool, adapters: Adapters, timeoutMs = DELIVE
   return tasks.length;
 }
 
-export function startDispatcher(pool: Pool, adapters: Adapters, intervalMs = 5000) {
+/** A function is resolved on every pass, so a breaker can hold an adapter's tasks without burning attempts. */
+export function startDispatcher(pool: Pool, adapters: Adapters | (() => Promise<Adapters>), intervalMs = 5000) {
   let stopped = false;
   let timer: NodeJS.Timeout;
   const loop = async () => {
     try {
-      await runOnce(pool, adapters);
+      await runOnce(pool, typeof adapters === 'function' ? await adapters() : adapters);
     } catch (e) {
       console.error('dispatcher pass failed', e);
     }

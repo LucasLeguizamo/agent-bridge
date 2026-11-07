@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import pg from 'pg';
 
 /**
@@ -32,7 +32,10 @@ export async function openTestSchema() {
     await probe.connect();
     const { rows: [r] } = await probe.query<{ s: string }>('SELECT current_schema() AS s');
     if (r!.s !== schema) throw new Error('search_path not applied; use a session pooler or direct URL');
-    await probe.query(readFileSync(new URL('../db/001_core.sql', import.meta.url), 'utf8'));
+    const dbDir = new URL('../db/', import.meta.url);
+    for (const file of readdirSync(dbDir).filter((f) => /^0.*\.sql$/.test(f)).sort()) {
+      await probe.query(readFileSync(new URL(file, dbDir), 'utf8'));
+    }
   } catch (e) {
     await drop();
     throw e;
