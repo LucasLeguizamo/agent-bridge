@@ -77,3 +77,11 @@ test('every other route still needs a key', async () => {
     assert.equal((await get(path)).status, 401, path);
   }
 });
+
+// Production, 2026-11-07: Grok's memory search answered invalid_body because the routine said ?q= instead of ?query=.
+test('the routine memory search uses the parameter name the API accepts', async () => {
+  const { MemorySearchInput } = await import('../src/memory.ts');
+  const m = GROK_ROUTINE.match(/GET \/memory\/search\?(\w+)=/);
+  assert.ok(m, 'the routine documents memory search');
+  assert.ok(MemorySearchInput.safeParse({ [m[1]!]: 'madrid' }).success, `?${m[1]}= must be accepted`);
+});
