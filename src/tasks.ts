@@ -149,11 +149,14 @@ export async function createTask(pool: Pool, from: string, t: NewTask) {
       // attempts > 0: a task that was rejected or never delivered, such as an unapproved side_effect, spawns nothing.
       if (!explicit || explicit.to_agent !== from || explicit.attempts === 0) throw new BridgeError(422, 'invalid_parent');
     }
+    // What the sender is acting on: a task it claimed and has not closed. Only with none does the broader guess apply
+    // (anything open or closed recently, highest hop), so an agent that omits parent_id mid-chain still counts hops.
+    // Every hop of a claimed ping-pong chains through the claimed task, so loops still stop at MAX_HOPS.
     const { rows: [implicit] } = await c.query<Task>(
       `SELECT * FROM task
        WHERE to_agent = $1 AND attempts > 0 AND state <> 'rejected'
          AND (state IN ('submitted', 'working', 'input_required') OR created_at > now() - $2::interval)
-       ORDER BY hop DESC, created_at DESC LIMIT 1`,
+       ORDER BY (state = 'working' AND claimed_at IS NOT NULL) DESC, hop DESC, created_at DESC LIMIT 1`,
       [from, IMPLICIT_PARENT_WINDOW],
     );
     // Naming an old low-hop parent must not reset the count, so the higher hop wins. parent_id stays what the sender
