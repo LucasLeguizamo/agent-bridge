@@ -23,10 +23,17 @@ for (const path of ['/', '/activate/grok', '/activate/instinct']) {
   });
 }
 
-test('the Grok page gives this deployment\'s MCP URL and the full routine', async () => {
+test('the Grok page gives the full routine with this deployment\'s URL', async () => {
   const body = await (await get('/activate/grok')).text();
-  assert.match(body, /https:\/\/bridge\.example\/mcp/);
-  assert.ok(body.includes(GROK_ROUTINE));
+  assert.ok(body.includes(GROK_ROUTINE.replaceAll('<URL del puente>', 'https://bridge.example')));
+  assert.ok(!body.includes('<URL del puente>'));
+});
+
+test('the routine uses curl with the BRIDGE_TOKEN secret and tells Lucas after each task', () => {
+  assert.match(GROK_ROUTINE, /Authorization: Bearer \$BRIDGE_TOKEN/);
+  assert.match(GROK_ROUTINE, /POST \/tasks\/<task_id>\/claim/);
+  assert.match(GROK_ROUTINE, /Avísale a Lucas en este chat/);
+  assert.ok(GROK_ROUTINE.indexOf('Avísale a Lucas') > GROK_ROUTINE.indexOf('POST /tasks/<task_id>/complete'), 'the notice comes after closing');
 });
 
 test('the routine matches the guide, so the two cannot drift', () => {
