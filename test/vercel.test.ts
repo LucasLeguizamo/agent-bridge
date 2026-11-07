@@ -150,6 +150,22 @@ describe('the wired bridge', () => {
     });
   });
 
+  test('a pull agent (adapter http) gets its task offered, so it shows in pending and can be claimed', async (t) => {
+    t.mock.method(console, 'log', () => {});
+    const b = bridgeOf();
+    await within(b, async () => {
+      await pool.query(`UPDATE agent SET adapter = 'http' WHERE id = 'claude'`);
+      const { task } = await createTask(pool, 'instinct', newTask({ to_agent: 'claude' }));
+      assert.deepEqual(await (await cron(b.app, CRON_SECRET)).json(), { status: 'ok', claimed: 1 });
+      const t1 = await reload(task.id);
+      assert.equal(t1.state, 'working');
+      assert.equal(t1.attempts, 1);
+      assert.equal(t1.claimed_at, null);
+      const pending = await b.app.request('/tasks/pending', { headers: { authorization: `Bearer ${KEYS.claude}` } });
+      assert.equal(((await pending.json()) as { tasks: { id: string }[] }).tasks[0]?.id, task.id);
+    });
+  });
+
   test('while the breaker is open a cron pass sends nothing and burns no attempt', async (t) => {
     t.mock.method(console, 'log', () => {});
     const b = bridgeOf();
