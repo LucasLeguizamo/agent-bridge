@@ -50,6 +50,14 @@ test('the Instinct page tells it to answer by CLI from this deployment, not by e
   assert.match(body, /No respondas los correos del puente/);
 });
 
+test('by default Instinct tells the owner and waits for a yes before it claims anything', async () => {
+  const body = await (await get('/activate/instinct')).text();
+  assert.match(body, /REGLA PERMANENTE/);
+  assert.match(body, /Espera mi respuesta\. No reclames ni completes nada hasta que te diga "sí"/);
+  assert.ok(body.indexOf('Espera mi respuesta') < body.indexOf('tasks claim <id>'), 'the wait comes before the claim');
+  assert.match(body, /rechazada por Lucas/);
+});
+
 test('every other route still needs a key', async () => {
   for (const path of ['/activate', '/activate/other', '/tasks/x', '/memory/search', '/mcp']) {
     assert.equal((await get(path)).status, 401, path);
