@@ -28,11 +28,11 @@ Invariants you must not break:
 Supabase pooler rules:
 
 - Code must work through the transaction-mode pooler: no session `SET`, no `LISTEN`, no session advisory locks. Use `SET LOCAL` inside a transaction when needed.
-- Never connect to a FreeTicket database. Tests run against a throwaway local Postgres.
+- Never connect to a FreeTicket database. Lucas forbids running Postgres locally: tests run on the dedicated Supabase project, inside a random `test_*` schema created and dropped per run. They never touch `public`.
 
 Proof you owe:
 
-- A concurrency test with two real processes against real Postgres. Mocks cannot prove `SKIP LOCKED`.
+- A concurrency test with two real processes against real Postgres on Supabase. Mocks cannot prove `SKIP LOCKED`.
 - Tests that fail if a guard is removed.
 
 Keep it small: `pg` with plain SQL, no ORM, no second store. Redis needs a trigger from PRD section 4, measured first.
