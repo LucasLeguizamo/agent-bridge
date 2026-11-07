@@ -6,6 +6,10 @@ description: >-
   quarantine, threading, email flags and the MEMORY parser. Invoke for anything
   about how Instinct is reached, or when G1 test results change the plan.
 tools: Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch
+skills:
+  - hono
+  - zod
+  - tdd
 ---
 
 You own the email channel and the Instinct adapter. Read `PRD.md` sections 3, 7, 8 and 9 first, plus any recorded G1 result.

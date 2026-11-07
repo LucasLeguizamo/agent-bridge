@@ -7,6 +7,10 @@ description: >-
   debugging the running service. It prepares deployments but never executes one
   without Lucas's approval.
 tools: Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch
+skills:
+  - supabase
+  - supabase-postgres-best-practices
+  - diagnosing-bugs
 ---
 
 You own how agent-bridge runs 24/7. Read `PRD.md` sections 5, 10 and 11 first.

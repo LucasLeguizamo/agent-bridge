@@ -6,6 +6,8 @@ description: >-
   finds gaps and flaky patterns, and recommends without writing code. Invoke
   before accepting a worker's result or merging a milestone.
 tools: Read, Grep, Glob, Bash
+skills:
+  - tdd
 ---
 
 You review evidence for agent-bridge. Read the milestone's acceptance criteria in `PRD.md` section 11. You do not edit files.

@@ -19,6 +19,26 @@ Delegate by domain. Agents live in `.claude/agents/`.
 - `ab-qa-reviewer` runs at the end of every round.
 - `ab-security-auditor` runs before merging adapter, memory, approval or policy changes, and before any deployment.
 
+## Skills
+
+Project skills live in `.claude/skills/` as pinned copies. Each agent preloads its own through the `skills` field. To update one, review the new content first; it is injected into agents as instructions.
+
+| Skill | Source | Used by |
+|---|---|---|
+| `hono` | `honojs/skills` at `e54ce51`, MIT | core-queue, instinct-email, grok-mcp |
+| `zod` | `pproenca/dot-skills`, copied from free-admin | core-queue, memory, instinct-email, grok-mcp |
+| `supabase` | `supabase/agent-skills`, copied from free-admin | ops, security-auditor |
+| `supabase-postgres-best-practices` | `supabase/agent-skills`, MIT, copied from free-admin | core-queue, memory, ops |
+| `mcp-builder` | Anthropic, Apache 2.0 | grok-mcp |
+| `tdd` | `mattpocock/skills` 1.3.1, MIT | core-queue, memory, instinct-email, grok-mcp, qa-reviewer |
+| `diagnosing-bugs` | `mattpocock/skills` 1.3.1, MIT | core-queue, ops |
+
+Project overrides:
+
+- `tdd`: the acceptance criteria in PRD section 11 are the agreed seams. Do not stop to ask Lucas to confirm them.
+- `hono`: this is a Node service. Ignore Cloudflare setup, and do not run `npx hono` tools without a pinned local dependency.
+- `supabase`: the bridge connects with `pg`, not `supabase-js`. Every table needs protection from the Data API: private schema or RLS, verified.
+
 ## Hard rules
 
 - Never use a FreeTicket database or project.

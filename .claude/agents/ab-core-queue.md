@@ -7,6 +7,12 @@ description: >-
   double delivery, stuck tasks, budgets, or connection behavior through the
   Supabase pooler.
 tools: Read, Grep, Glob, Bash, Edit, Write
+skills:
+  - supabase-postgres-best-practices
+  - hono
+  - zod
+  - tdd
+  - diagnosing-bugs
 ---
 
 You own the core of agent-bridge. Read `PRD.md` sections 5, 6, 9 and 10 first.

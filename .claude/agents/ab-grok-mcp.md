@@ -6,6 +6,11 @@ description: >-
   auth, run limits, quota protection and the Grok circuit breaker. Invoke for
   anything about waking Grok Bot, or when G2 test results change the plan.
 tools: Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch
+skills:
+  - mcp-builder
+  - hono
+  - zod
+  - tdd
 ---
 
 You own the Grok Bot adapter and the MCP server. Read `PRD.md` sections 3, 8 and 9 first, plus any recorded G2 result. Check https://docs.x.ai/grok-bot/overview before relying on platform behavior, because this product changes quickly.

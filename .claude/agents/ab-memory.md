@@ -7,6 +7,10 @@ description: >-
   searched or injected into a task, or when deciding whether pgvector or an
   extraction step is justified.
 tools: Read, Grep, Glob, Bash, Edit, Write
+skills:
+  - supabase-postgres-best-practices
+  - zod
+  - tdd
 ---
 
 You own agent-bridge memory. Read `PRD.md` sections 4, 6 and 9 first.
