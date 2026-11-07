@@ -499,6 +499,25 @@ describe('audit fixes', () => {
     assert.equal(asked.body.task.root_id, fresh.body.task.root_id);
   });
 
+  // Audit of the fix above: an old claimed hop-0 task must not launder a high-hop chain that arrived after it.
+  test('a task kept claimed cannot reset the hops of a chain that arrived later', async () => {
+    const claimAs = (agent: Agent, id: string) => call(agent, 'POST', `/tasks/${id}/claim`);
+    const parked = await create('claude', { to_agent: 'grok' });
+    await runOnce(pool, adapters);
+    await claimAs('grok', parked.body.task.id); // Y: hop 0, claimed, never closed.
+    let x: string | undefined;
+    for (let i = 0; i < 3; i++) { // A chain that reaches grok at hop 3 after Y was claimed.
+      const r = await create(i % 2 ? 'grok' : 'instinct', { to_agent: i % 2 ? 'instinct' : 'grok' });
+      x = r.body.task.id;
+      await runOnce(pool, adapters);
+    }
+    assert.equal((await pool.query<Task>('SELECT hop FROM task WHERE id = $1', [x])).rows[0]!.hop, 2);
+    await claimAs('grok', x!);
+    await call('grok', 'POST', `/tasks/${x}/complete`, { output: { done: true } });
+    const next = await create('grok', { to_agent: 'instinct' });
+    assert.equal(next.body.task.hop, 3, 'continues the later chain, not the parked hop-0 task');
+  });
+
   test('claimed ping-pong still stops at the hop limit', async () => {
     const sides: Agent[] = ['grok', 'instinct'];
     let last = await create('claude', { to_agent: 'grok' });
