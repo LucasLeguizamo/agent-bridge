@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import type { Json, Task } from './tasks.ts';
+import { CLAIM_ADAPTERS, CLAIM_GRACE_SECONDS, type Json, type Task } from './tasks.ts';
 
 export const MAX_ATTEMPTS = 5;
 // The lease must outlast the delivery timeout, so a live delivery is never re-claimed.
@@ -29,6 +29,9 @@ export async function claim(pool: Pool, adapters: Adapters, limit = 10) {
            WHERE p.agent_a = LEAST(t.from_agent, t.to_agent)
              AND p.agent_b = GREATEST(t.from_agent, t.to_agent)
              AND p.paused_until > now())
+         AND (t.risk <> 'side_effect' OR EXISTS (
+           SELECT 1 FROM approval ap
+           WHERE ap.task_id = t.id AND ap.decision = 'approved' AND ap.expires_at > now()))
        ORDER BY t.next_attempt_at
        LIMIT $3
        FOR UPDATE OF t SKIP LOCKED
@@ -48,7 +51,22 @@ export async function claim(pool: Pool, adapters: Adapters, limit = 10) {
 }
 
 // `attempts = $2` fences stale acks: a slower attempt cannot overwrite a newer one.
-export async function ackDelivered(pool: Pool, t: Pick<Task, 'id' | 'attempts'>) {
+// On a claim adapter a 2xx only means a run may have started, so the task stays `submitted`, due again after the grace
+// period: the queue re-sends it inside MAX_ATTEMPTS until task_claim moves it to `working`. The wait doubles each time.
+export async function ackDelivered(pool: Pool, t: Pick<Task, 'id' | 'attempts'> & { adapter?: string }) {
+  if (t.adapter && CLAIM_ADAPTERS.includes(t.adapter)) {
+    await pool.query(
+      `WITH up AS (
+         UPDATE task SET next_attempt_at = now() + make_interval(secs => $3)
+         WHERE id = $1 AND attempts = $2 AND state = 'submitted'
+         RETURNING id
+       )
+       INSERT INTO event (task_id, actor, type, payload)
+       SELECT id, 'bridge', 'delivered', jsonb_build_object('attempt', $2::int) FROM up`,
+      [t.id, t.attempts, CLAIM_GRACE_SECONDS * 2 ** (t.attempts - 1)],
+    );
+    return;
+  }
   await pool.query(
     `WITH up AS (
        UPDATE task SET state = 'working'
@@ -105,7 +123,7 @@ export async function sweep(pool: Pool) {
   );
 }
 
-/** One dispatcher pass. Returns how many tasks it claimed. */
+/** One dispatcher pass, whatever triggered it. Returns how many tasks it claimed. */
 export async function runOnce(pool: Pool, adapters: Adapters, timeoutMs = DELIVERY_TIMEOUT_MS) {
   await sweep(pool);
   const tasks = await claim(pool, adapters);
@@ -126,18 +144,22 @@ export async function runOnce(pool: Pool, adapters: Adapters, timeoutMs = DELIVE
   return tasks.length;
 }
 
-/** A function is resolved on every pass, so a breaker can hold an adapter's tasks without burning attempts. */
-export function startDispatcher(pool: Pool, adapters: Adapters | (() => Promise<Adapters>), intervalMs = 5000) {
-  let stopped = false;
-  let timer: NodeJS.Timeout;
-  const loop = async () => {
-    try {
-      await runOnce(pool, typeof adapters === 'function' ? await adapters() : adapters);
-    } catch (e) {
-      console.error('dispatcher pass failed', e);
-    }
-    if (!stopped) timer = setTimeout(loop, intervalMs);
-  };
-  void loop();
-  return () => { stopped = true; clearTimeout(timer); };
+/** True when a pass has anything to do: something to send, or a deadline to enforce. Covers all that sweep can fail. */
+export async function hasDueWork(pool: Pool) {
+  const { rows: [r] } = await pool.query<{ due: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM task WHERE state = 'submitted' AND next_attempt_at <= now())
+         OR EXISTS (SELECT 1 FROM task WHERE state IN ('submitted', 'working', 'input_required') AND deadline_at <= now()) AS due`,
+  );
+  return r!.due;
+}
+
+/**
+ * What a cron tick or a new task triggers. Runs every minute with nothing to do, so an idle pass is this one read.
+ * Worst case with every query at its timeout stays under maxDuration in vercel.json. A pass killed anyway loses nothing:
+ * its tasks are retried when the lease ends. A function is resolved only when there is work, and then on every pass, so
+ * a breaker can hold an adapter's tasks without burning attempts.
+ */
+export async function runPass(pool: Pool, adapters: Adapters | (() => Promise<Adapters>), timeoutMs?: number) {
+  if (!(await hasDueWork(pool))) return 0;
+  return runOnce(pool, typeof adapters === 'function' ? await adapters() : adapters, timeoutMs);
 }

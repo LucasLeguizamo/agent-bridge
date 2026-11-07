@@ -19,7 +19,7 @@ Memoria compartida e invocación asíncrona entre agentes siempre activos: Insti
 2. **Grok Bot sí se puede invocar por programa.** Es el agente proactivo de xAI, con computador persistente en la nube. Sus routines arrancan por webhook autenticado o por correo a la dirección del Bot, y acepta servidores MCP propios. El puente es asimétrico: webhook y MCP con Grok Bot, correo con Instinct (sección 8).
 3. **Los términos de Instinct limitan el diseño.** Es solo para uso personal, prohíbe bots y scraping, y te hace responsable de lo que el agente firme o compre. Esto descarta varios atajos (sección 7).
 4. **Redis no debe ser el sistema de registro.** Para este volumen y esta latencia (correo, minutos), Postgres solo cubre memoria y cola con menos piezas (sección 4).
-5. **Orca orquesta la construcción, no el runtime.** Sus automations lanzan agentes por calendario desde la app. El puente 24/7 tiene que vivir en un servidor (sección 11).
+5. **Orca orquesta la construcción, no el runtime.** Sus automations lanzan agentes por calendario desde la app. El puente 24/7 tiene que vivir fuera de tu Mac (secciones 5 y 11).
 
 **Propuesta:** un servicio pequeño (`bridge`) con Postgres, donde cada agente es un adaptador. El puente recibe tareas, arma el contexto desde la memoria, se las entrega al otro agente por el canal que tenga y guarda el resultado con su procedencia. Es asíncrono, tolera horas de demora y tiene frenos contra bucles y aprobación humana para acciones con efecto real.
 
@@ -103,31 +103,35 @@ flowchart LR
     G[Grok Bot]
     C[Claude Code / MCP clients]
   end
-  subgraph Bridge["bridge (one container, 24/7)"]
+  subgraph Bridge["bridge (Vercel Functions)"]
     IN[Inbound: webhooks + API]
     GUARD[Guards: auth, loops, budget, policy]
-    W[Dispatcher + timeouts]
+    W[Dispatcher + timeouts: one pass per request]
     A1[Email adapter]
     A2[Grok Bot webhook adapter]
     MCP[MCP server: memory + tasks]
   end
   DB[(Postgres: task, event, fact, approval)]
   H[Lucas: approvals + alerts]
+  CRON[pg_cron + pg_net in Supabase, every minute]
 
   I -- email --> IN
   G -- MCP tools --> MCP --> GUARD
   C -- MCP or HTTP API --> IN
   IN --> GUARD --> DB
   DB --> W
+  CRON -- POST /cron/dispatch --> W
   W --> A1 -- email + context pack --> I
   W --> A2 -- webhook --> G
   GUARD -- side effects --> H
   H -- signed link --> IN
 ```
 
-**Stack:** TypeScript sobre Node 24, Hono, `pg` sin ORM, Zod. Un proceso en un contenedor, en cualquier host Docker con reinicio automático. El proveedor de correo entrante se elige en M3 y el host en M6.
+**Stack:** TypeScript sobre Node 24, Hono, `pg` sin ORM, Zod. Corre en Vercel Hobby, con funciones en la región `pdx1`, junto a Supabase en `aws-1-us-west-2`. El proveedor de correo entrante se elige en M3.
 
-**Base de datos:** Supabase, en un proyecto nuevo y dedicado. **Nunca el de FreeTicket.** El dispatcher consulta cada pocos segundos, así que no cuentes con ahorro por pausa o scale-to-zero. El código debe funcionar por el pooler en modo transacción: nada de `SET` de sesión ni `LISTEN`, y `SKIP LOCKED` dentro de una transacción corta. Las tablas viven en el schema privado `bridge`, fuera de la API de datos de Supabase, y la app entra con el rol `bridge_app`, de permisos mínimos y `search_path` fijo. Nunca se levanta Postgres en local: los tests corren en Supabase, cada corrida en un schema temporal propio que se borra al terminar.
+**Sin proceso permanente.** Una función no sobrevive entre pedidos, así que el dispatcher es una pasada por pedido: `POST /cron/dispatch`, con token Bearer comparado en tiempo constante contra `CRON_SECRET`, que falla cerrado si no está. Lo dispara `pg_cron` con `pg_net` en Supabase cada minuto, con el secreto en Vault (`db/cron_dispatch.sql`), porque el cron de Vercel en Hobby corre solo una vez al día. Crear una tarea además despacha enseguida con `waitUntil`, sin esperar el minuto. Si eso falla, la toma el cron. La latencia en el peor caso es de un minuto y sigue dentro del p95 de la sección 10. Una pasada sin trabajo es una sola lectura.
+
+**Base de datos:** Supabase, en un proyecto nuevo y dedicado. **Nunca el de FreeTicket.** El cron consulta cada minuto, así que no cuentes con ahorro por pausa o scale-to-zero. El código debe funcionar por el pooler en modo transacción: nada de `SET` de sesión ni `LISTEN`, y `SKIP LOCKED` dentro de una transacción corta. Las tablas viven en el schema privado `bridge`, fuera de la API de datos de Supabase, y la app entra con el rol `bridge_app`, de permisos mínimos, con `search_path` y `statement_timeout` fijos en el rol, porque los parámetros de arranque no pasan por el pooler. Nunca se levanta Postgres en local: los tests corren en Supabase, cada corrida en un schema temporal propio que se borra al terminar.
 
 ## 6. Datos y ciclo de vida
 
@@ -349,7 +353,7 @@ Es la parte más delicada. Conectar dos agentes con acceso a tus cuentas crea un
 | **M3** Adaptador de correo | Entrada, salida, tokens, cuarentena, parser | M1, G1 | Correo falsificado o sin token no crea tarea; ida y vuelta real con buzón de prueba |
 | **M4** Adaptador Grok Bot | Webhook, MCP del puente (HTTP streamable) y flags de correo | M1, M2, G2 | Una delegación real con `task_complete`; clave inválida rechazada; correo con token falso termina sin actuar |
 | **M5** Control | Aprobaciones, filtro de secretos, kill switch, alertas | M1 | `side_effect` no se entrega sin aprobación; aprobación vencida rechaza; enlace firmado no se reutiliza |
-| **M6** E2E y despliegue | Contenedor, backup, alertas, runbook | M2 a M5 | Las pruebas de la sección 13 pasan; restauración probada. **Despliegue con aprobación humana** |
+| **M6** E2E y despliegue | Vercel, cron en Supabase, backup, alertas, runbook | M2 a M5 | Las pruebas de la sección 13 pasan; restauración probada. **Despliegue con aprobación humana** |
 
 **Pruebas de G1, con tu cuenta y sin datos sensibles:**
 

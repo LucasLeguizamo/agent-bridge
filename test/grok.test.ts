@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -137,7 +136,8 @@ describe('webhook adapter', () => {
     assert.equal(hits[0]!.method, 'POST');
     assert.equal(hits[0]!.headers.authorization, `Bearer ${WEBHOOK_KEY}`);
     assert.deepEqual(JSON.parse(hits[0]!.body), { task_id: t.id });
-    assert.equal((await reload(t.id)).state, 'working');
+    // A 2xx only means a run may have started: it stays submitted, to be re-sent, until task_claim.
+    assert.equal((await reload(t.id)).state, 'submitted');
   });
 
   test('a non-2xx response is a failed delivery, and the queue retries it', async () => {
@@ -151,7 +151,6 @@ describe('webhook adapter', () => {
     await expireLease(t.id);
     await pass();
     cur = await reload(t.id);
-    assert.equal(cur.state, 'working');
     assert.equal(cur.attempts, 2);
     assert.equal(hits.length, 2);
   });
@@ -238,13 +237,13 @@ describe('circuit breaker', () => {
     assert.equal(await breakerOpen(pool, NO_GRACE), false);
   });
 
-  test('failed sends do not count as runs, since no run started', async () => {
+  test('failed sends count too: an error answer does not prove that no run started', async () => {
     await toGrok();
     await toGrok();
     await toGrok();
     nextStatus = [500, 500, 500];
     await pass();
-    assert.equal(await breakerOpen(pool, NO_GRACE), false);
+    assert.equal(await breakerOpen(pool, NO_GRACE), true);
   });
 
   test('three misses spread over more than 15 minutes do not trip it', async () => {
@@ -277,7 +276,7 @@ describe('circuit breaker', () => {
     hits = [];
     await runOnce(pool, await gate());
     assert.equal(hits.length, 1);
-    assert.equal((await reload(held.id)).state, 'working');
+    assert.equal((await reload(held.id)).attempts, 1);
     assert.equal((await alerts()).filter((a) => a.alert === 'grok_breaker_open').length, 1);
   });
 });
@@ -425,7 +424,7 @@ describe('task_complete', () => {
     const r = await tool(await mcp('grok'), 'task_complete', { task_id: t.id, output: {} });
     assert.equal(r.isError, true);
     assert.equal(r.body.error, 'not_claimed');
-    assert.equal((await reload(t.id)).state, 'working');
+    assert.equal((await reload(t.id)).state, 'submitted');
   });
 
   test('another agent cannot close the task, and learns nothing about it', async () => {
@@ -598,71 +597,6 @@ describe('breaker and claims', () => {
     await pool.query('UPDATE task SET attempts = 1 WHERE id = $1', [own.id]);
     assert.equal((await tool(await mcp('claude'), 'task_claim', { task_id: own.id })).body.claimed, true);
     assert.equal(await breakerOpen(pool, 0), true);
-  });
-});
-
-describe('src/main.ts wiring', () => {
-  const freePort = async () => {
-    const probe = createServer().listen(0, '127.0.0.1');
-    await once(probe, 'listening');
-    const { port } = probe.address() as AddressInfo;
-    probe.close();
-    await once(probe, 'close');
-    return port;
-  };
-  const waitFor = async (check: () => Promise<boolean> | boolean, what: string, ms = 30_000) => {
-    const end = Date.now() + ms;
-    while (Date.now() < end) {
-      if (await check()) return;
-      await new Promise((r) => setTimeout(r, 200));
-    }
-    assert.fail(`timed out waiting for ${what}`);
-  };
-  const startMain = async (grokEnv: Record<string, string>) => {
-    const port = await freePort();
-    const child = spawn(process.execPath, ['src/main.ts'], {
-      cwd: new URL('..', import.meta.url),
-      env: { PATH: process.env.PATH!, DATABASE_URL: db!.url, BRIDGE_AGENT_KEYS: JSON.stringify(KEYS), PORT: String(port), ...grokEnv },
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
-    let stderr = '';
-    child.stderr.on('data', (c: Buffer) => { stderr += c.toString(); });
-    const base = `http://127.0.0.1:${port}`;
-    await waitFor(() => fetch(`${base}/health`).then((r) => r.ok, () => false), 'the bridge to start');
-    return {
-      base,
-      stderr: () => stderr,
-      stop: async () => { child.kill('SIGTERM'); await once(child, 'exit'); },
-    };
-  };
-  // Long enough for the dispatcher, which runs a pass on start and then every 5 seconds.
-  const SECOND_PASS_MS = 8000;
-
-  test('with both variables the dispatcher wakes the routine, and MCP is mounted', async () => {
-    const t = await toGrok();
-    const main = await startMain({ GROK_WEBHOOK_URL: receiverUrl, GROK_WEBHOOK_KEY: WEBHOOK_KEY });
-    try {
-      await waitFor(() => hits.length === 1, 'the webhook');
-      assert.deepEqual(JSON.parse(hits[0]!.body), { task_id: t.id });
-      const res = await fetch(`${main.base}/mcp`, { method: 'POST', body: '{}' });
-      assert.equal(res.status, 401);
-    } finally {
-      await main.stop();
-    }
-  });
-
-  test('with one variable missing the adapter does not load: tasks wait and it warns', async () => {
-    const t = await toGrok();
-    const main = await startMain({ GROK_WEBHOOK_URL: receiverUrl });
-    try {
-      await new Promise((r) => setTimeout(r, SECOND_PASS_MS));
-      assert.equal(hits.length, 0);
-      assert.equal((await reload(t.id)).attempts, 0);
-      assert.match(main.stderr(), /Grok adapter not loaded/);
-      assert.ok(!main.stderr().includes(receiverUrl), 'the warning must not echo the URL');
-    } finally {
-      await main.stop();
-    }
   });
 });
 

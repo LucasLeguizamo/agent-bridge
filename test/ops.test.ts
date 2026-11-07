@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { migrate } from '../db/migrate.ts';
+import { smokeCheck } from '../db/smoke.ts';
 import { createApp } from '../src/http.ts';
 
 const DB_DIR = fileURLToPath(new URL('../db/', import.meta.url));
@@ -126,6 +127,44 @@ describe('migrate', () => {
     await assert.rejects(migrate(client, schema, dir), /has 5 of 6 tables/);
     assert.equal(await exists(`${schema}.schema_migration`), false);
     await assert.rejects(migrate(client, `${schema}_missing`, dir), /does not exist/);
+  });
+
+  // Temp schemas skip bridge_access.sql, whose table-level grant on fact is what 002_memory.sql has to take back. Only
+  // its table GRANTs run here, on this schema: its ALTER ROLE would change the live role.
+  test('on live-like grants, bridge_app can retire a fact but cannot write trust or rewrite a value', async (t) => {
+    const { rows: [r] } = await client.query(`SELECT to_regrole('bridge_app') IS NOT NULL AS present`);
+    if (!r.present) return t.skip('bridge_app does not exist in this database');
+    const grants = readFileSync(join(DB_DIR, 'bridge_access.sql'), 'utf8').split('\n')
+      .filter((l) => l.startsWith('GRANT ') && !/\bSCHEMA\b/.test(l)).join('\n');
+    assert.match(grants, /UPDATE ON agent, task, fact/, 'the grant this test exists for');
+    await client.query(`BEGIN; SET LOCAL search_path = ${schema}; ${grants}; COMMIT;`);
+    await migrate(client, schema, DB_DIR);
+
+    const can = async (column: string, priv: string) => (await client.query(
+      'SELECT has_column_privilege($1, $2, $3, $4) AS ok', ['bridge_app', `${schema}.fact`, column, priv])).rows[0].ok as boolean;
+    assert.equal(await can('trust', 'UPDATE'), false);
+    assert.equal(await can('trust', 'INSERT'), false);
+    assert.equal(await can('value', 'UPDATE'), false);
+    assert.equal(await can('superseded_by', 'UPDATE'), true);
+    assert.equal(await can('value', 'INSERT'), true);
+    // Tasks keep their table-level grant, which the queue needs.
+    assert.equal((await client.query('SELECT has_table_privilege($1, $2, $3) AS ok', ['bridge_app', `${schema}.task`, 'UPDATE'])).rows[0].ok, true);
+  });
+
+  test('the smoke check writes, supersedes and searches, and leaves nothing behind', async () => {
+    await migrate(client, schema, DB_DIR);
+    const scoped = new URL(testUrl());
+    scoped.searchParams.set('options', `-c search_path=${schema}`);
+    const smoke = new pg.Client({ connectionString: scoped.href });
+    await smoke.connect();
+    try {
+      assert.deepEqual(await smokeCheck(smoke), { wrote: true, superseded: true, found: true, rolled_back: true });
+    } finally {
+      await smoke.end();
+    }
+    for (const table of ['fact', 'agent']) {
+      assert.equal((await client.query(`SELECT 1 FROM ${schema}.${table} WHERE ${table === 'fact' ? 'source_agent' : 'id'} = 'smoke'`)).rows.length, 0);
+    }
   });
 
   test('the real db/ files apply on the pre-tracking schema', async () => {

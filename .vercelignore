@@ -1,0 +1,6 @@
+.claude
+.engram
+.env*
+docs
+test
+PRD.md

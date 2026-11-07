@@ -2,11 +2,19 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
+import { containsSecret, containsSecretDeep } from './secrets.ts';
 
 export const MAX_HOPS = 4; // hop is 0-based, so a chain gets hops 0..3: four deliveries.
 export const DAILY_PAIR_CAP = 20;
 const PAUSE = '1 hour';
 const MAX_REJECTED_PER_HOUR = 100;
+const MAX_REFUSALS_PER_HOUR = 100;
+// Adapters whose agent takes a task with task_claim, so the bridge can tell a delivery nobody picked up.
+// An email has no claim step: its reply is the first sign of life.
+export const CLAIM_ADAPTERS = ['grok'];
+// A run only counts as missed once it has had this long to call task_claim.
+// ASSUMPTION (G2): a healthy routine claims within 5 minutes. A slower one may trip the breaker early, and gets a re-send.
+export const CLAIM_GRACE_SECONDS = 300;
 // A new task this soon after receiving work counts as part of that chain, even without parent_id.
 const IMPLICIT_PARENT_WINDOW = '15 minutes';
 
@@ -18,7 +26,7 @@ export type Task = {
   risk: 'read' | 'write' | 'side_effect';
   state: 'submitted' | 'working' | 'input_required' | 'completed' | 'failed' | 'canceled' | 'rejected';
   hop: number; idempotency_key: string; attempts: number;
-  next_attempt_at: Date; deadline_at: Date; created_at: Date;
+  next_attempt_at: Date; deadline_at: Date; created_at: Date; claimed_at: Date | null;
 };
 export type NewTask = {
   to_agent: string; intent: string; input: Json;
@@ -84,8 +92,29 @@ async function guardVerdict(c: PoolClient, from: string, t: NewTask, hop: number
   return null;
 }
 
+/**
+ * Audits a refusal, in its own statement because the refused work never gets a transaction. Past the cap it stores
+ * nothing and the caller still refuses, so refused requests cannot grow the table without limit.
+ * `taskId` attaches only to a task the agent receives, so nobody can write into the audit trail of someone else's.
+ */
+export async function recordRefusal(pool: Pool, agent: string, type: string, payload: Json, taskId: string | null = null) {
+  await pool.query(
+    `INSERT INTO event (task_id, actor, type, payload)
+     SELECT (SELECT id FROM task WHERE id = $1::uuid AND to_agent = $2), $2, $3, $4::jsonb
+     WHERE (SELECT count(*) FROM event
+            WHERE actor = $2 AND type = $3 AND created_at > now() - interval '1 hour') < $5`,
+    [taskId, agent, type, JSON.stringify(payload), MAX_REFUSALS_PER_HOUR],
+  );
+}
+
+const refuseSecret = async (pool: Pool, agent: string, taskId: string | null = null) => {
+  await recordRefusal(pool, agent, 'secret_rejected', { reason: 'secret' }, taskId);
+  return new BridgeError(422, 'secret_rejected');
+};
+
 /** Runs guards, then stores the task. A guard hit stores a `rejected` task, so the decision is auditable. */
-export function createTask(pool: Pool, from: string, t: NewTask) {
+export async function createTask(pool: Pool, from: string, t: NewTask) {
+  if (containsSecret(t.intent) || containsSecretDeep(t.input)) throw await refuseSecret(pool, from);
   // Keys are namespaced per sender so one agent cannot collide with or probe another's.
   const key = `${from}:${t.idempotency_key}`;
   return tx(pool, async (c) => {
@@ -111,20 +140,22 @@ export function createTask(pool: Pool, from: string, t: NewTask) {
     if (agents.length !== 2) throw new BridgeError(422, 'unknown_agent');
 
     // hop and root come only from stored tasks; the client cannot reset them by omitting parent_id.
-    let parent: Task | undefined;
+    let explicit: Task | undefined;
     if (t.parent_id) {
-      ({ rows: [parent] } = await c.query<Task>('SELECT * FROM task WHERE id = $1', [t.parent_id]));
+      ({ rows: [explicit] } = await c.query<Task>('SELECT * FROM task WHERE id = $1', [t.parent_id]));
       // attempts > 0: a task that was rejected or never delivered, such as an unapproved side_effect, spawns nothing.
-      if (!parent || parent.to_agent !== from || parent.attempts === 0) throw new BridgeError(422, 'invalid_parent');
-    } else {
-      ({ rows: [parent] } = await c.query<Task>(
-        `SELECT * FROM task
-         WHERE to_agent = $1 AND attempts > 0 AND state <> 'rejected'
-           AND (state IN ('submitted', 'working', 'input_required') OR created_at > now() - $2::interval)
-         ORDER BY hop DESC, created_at DESC LIMIT 1`,
-        [from, IMPLICIT_PARENT_WINDOW],
-      ));
+      if (!explicit || explicit.to_agent !== from || explicit.attempts === 0) throw new BridgeError(422, 'invalid_parent');
     }
+    const { rows: [implicit] } = await c.query<Task>(
+      `SELECT * FROM task
+       WHERE to_agent = $1 AND attempts > 0 AND state <> 'rejected'
+         AND (state IN ('submitted', 'working', 'input_required') OR created_at > now() - $2::interval)
+       ORDER BY hop DESC, created_at DESC LIMIT 1`,
+      [from, IMPLICIT_PARENT_WINDOW],
+    );
+    // Naming an old low-hop parent must not reset the count, so the higher hop wins. parent_id stays what the sender
+    // named: replays compare against it, and root_id is what reconstructs the conversation.
+    const parent = implicit && (!explicit || implicit.hop > explicit.hop) ? implicit : explicit;
     const root = parent?.root_id;
     const hop = parent ? parent.hop + 1 : 0;
 
@@ -146,13 +177,13 @@ export function createTask(pool: Pool, from: string, t: NewTask) {
        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12, now() + interval '24 hours')
        ON CONFLICT (idempotency_key) DO NOTHING
        RETURNING *`,
-      [id, root ?? id, parent?.id ?? null, from, t.to_agent, t.intent, JSON.stringify(t.input),
+      [id, root ?? id, explicit?.id ?? parent?.id ?? null, from, t.to_agent, t.intent, JSON.stringify(t.input),
         reason ? JSON.stringify({ rejected: reason }) : null, risk, state, hop, key],
     );
     if (!task) return (await replay())!; // Lost a race with the same key on another pair.
 
     await logEvent(c, task.id, from, reason ? 'task_rejected' : 'task_created', {
-      risk, hop, state, reason, implicit_parent: Boolean(parent && !t.parent_id),
+      risk, hop, state, reason, implicit_parent: Boolean(parent && parent !== explicit),
     });
     if (state === 'input_required') await logEvent(c, task.id, 'bridge', 'approval_required', { intent: t.intent });
 
@@ -195,24 +226,32 @@ export async function getEvents(pool: Pool, id: string, agent: string) {
 /**
  * Receiver closes a task. A delivered-but-unacked task counts as delivered (attempts > 0):
  * the reply may beat the ack, or the dispatcher may have crashed in between.
+ * An agent on a claim adapter must have claimed it first: only the run that claimed it knows the task.
  */
 export async function finishTask(pool: Pool, id: string, agent: string, state: 'completed' | 'failed', output: Json) {
+  if (containsSecretDeep(output)) throw await refuseSecret(pool, agent, id);
   const { rows: [t] } = await pool.query<Task>(
     `WITH up AS (
        UPDATE task SET state = $3, output = $4::jsonb
        WHERE id = $1 AND to_agent = $2
          AND (state = 'working' OR (state = 'submitted' AND attempts > 0))
+         AND deadline_at > now()
+         AND (claimed_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM agent a WHERE a.id = $2 AND a.adapter = ANY($5)))
        RETURNING *
      ), ev AS (
        INSERT INTO event (task_id, actor, type, payload)
        SELECT id, $2, 'task_' || $3, '{}'::jsonb FROM up
      )
      SELECT * FROM up`,
-    [id, agent, state, JSON.stringify(output)],
+    [id, agent, state, JSON.stringify(output), CLAIM_ADAPTERS],
   );
   if (t) return t;
   const cur = await getTask(pool, id, agent);
   if (cur.to_agent === agent && cur.state === state && isDeepStrictEqual(cur.output, output)) return cur;
+  if (cur.to_agent === agent && (cur.state === 'working' || cur.state === 'submitted')) {
+    if (cur.deadline_at <= new Date()) throw new BridgeError(409, 'deadline_passed');
+    if (!cur.claimed_at) throw new BridgeError(409, 'not_claimed');
+  }
   throw new BridgeError(409, 'invalid_state');
 }
 
