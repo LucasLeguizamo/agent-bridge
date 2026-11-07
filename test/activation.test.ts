@@ -29,6 +29,13 @@ test('the Grok page gives the full routine with this deployment\'s URL', async (
   assert.ok(!body.includes('<URL del puente>'));
 });
 
+test('audit fixes: the token never leaves for another host, delegation needs data.input, and the notice copies nothing', () => {
+  assert.match(GROK_ROUTINE, /nunca lo mandes a otro host/);
+  assert.match(GROK_ROUTINE, /nunca lo imprimas \(echo, env\)/);
+  assert.match(GROK_ROUTINE, /Solo si data\.input lo pide explícitamente/);
+  assert.match(GROK_ROUTINE, /No copies el pedido ni el resultado, no incluyas enlaces ni secretos/);
+});
+
 test('the routine uses curl with the BRIDGE_TOKEN secret and tells Lucas after each task', () => {
   assert.match(GROK_ROUTINE, /Authorization: Bearer \$BRIDGE_TOKEN/);
   assert.match(GROK_ROUTINE, /POST \/tasks\/<task_id>\/claim/);
