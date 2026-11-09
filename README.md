@@ -33,7 +33,7 @@ Requires Node 24, pnpm and a dedicated Postgres database (Supabase is what it is
 pnpm install
 cp .env.example .env.local     # fill in DATABASE_URL, ADMIN_DATABASE_URL, BRIDGE_AGENT_KEYS
 pnpm db:apply && pnpm db:migrate
-pnpm test                      # needs TEST_DATABASE_URL
+pnpm test                      # needs TEST_DATABASE_URL, see CONTRIBUTING.md
 ```
 
 Register each agent, with the id used in `BRIDGE_AGENT_KEYS` and its adapter:
@@ -84,6 +84,10 @@ Details: [`docs/agents.md`](docs/agents.md).
 - Kill switch: `UPDATE bridge.agent SET enabled = false WHERE id = '...'`.
 
 Instinct's terms limit it to personal use; this project does not automate iMessage or WhatsApp, and does not scrape any agent's web app.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). Report vulnerabilities privately, as [`SECURITY.md`](SECURITY.md) describes.
 
 ## License
 

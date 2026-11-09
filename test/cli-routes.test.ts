@@ -180,6 +180,33 @@ describe('CLI config files and self-update', () => {
     const good = createHash('sha256').update(readFileSync(CLI)).digest('hex');
     assert.equal((await run(copy, { BRIDGE_URL: url }, ['update', '--sha256', good])).json.updated, true);
   });
+  test('update installs nothing from a non-CLI body, an HTTP error or a redirect, even when the hash matches', async () => {
+    const bodies: Record<string, [number, Record<string, string>, string]> = {
+      '/html/cli/bridge.mjs': [200, {}, '<html>hello</html>'],
+      '/error/cli/bridge.mjs': [500, {}, readFileSync(CLI, 'utf8')],
+      '/redirect/cli/bridge.mjs': [302, { location: `${url}/cli/bridge.mjs` }, readFileSync(CLI, 'utf8')],
+    };
+    const fake = serve({ port: 0, fetch: (req) => {
+      const [status, headers, body] = bodies[new URL(req.url).pathname] ?? [404, {}, ''];
+      return new Response(body, { status, headers });
+    } });
+    await once(fake, 'listening');
+    const base = `http://127.0.0.1:${(fake.address() as AddressInfo).port}`;
+    try {
+      for (const [path, [, , body]] of Object.entries(bodies)) {
+        const dir = mkdtempSync(join(tmpdir(), 'bridge-update-'));
+        const copy = join(dir, 'bridge.mjs');
+        copyFileSync(CLI, copy);
+        const before = readFileSync(copy, 'utf8');
+        const hash = createHash('sha256').update(body).digest('hex');
+        const r = await run(copy, { BRIDGE_URL: base + path.replace('/cli/bridge.mjs', '') }, ['update', '--sha256', hash]);
+        assert.notEqual(r.code, 0, path);
+        assert.equal(readFileSync(copy, 'utf8'), before, path);
+      }
+    } finally {
+      fake.close();
+    }
+  });
 });
 
 describe('GET /tasks/pending', () => {

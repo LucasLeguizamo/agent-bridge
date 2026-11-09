@@ -28,7 +28,7 @@ Invariants you must not break:
 Supabase pooler rules:
 
 - Code must work through the transaction-mode pooler: no session `SET`, no `LISTEN`, no session advisory locks. Use `SET LOCAL` inside a transaction when needed.
-- Never connect to a FreeTicket database. Lucas forbids running Postgres locally: tests run on the dedicated Supabase project, inside a random `test_*` schema created and dropped per run. They never touch `public`.
+- Tests run on a local Postgres (with `test/setup.sql` applied) or on a dedicated Supabase project, inside a random `test_*` schema created and dropped per run. They never touch `public`, and `test/pg.ts` refuses any other host.
 
 Proof you owe:
 

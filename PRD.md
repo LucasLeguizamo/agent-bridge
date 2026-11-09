@@ -19,7 +19,7 @@ Shared memory and asynchronous invocation between always-on agents: Instinct and
 2. **Grok Bot can be invoked programmatically.** It is xAI's proactive agent, with a persistent cloud computer. Its routines start from an authenticated webhook or from an email to the Bot's address, and it accepts custom MCP servers. The bridge is asymmetric: webhook and MCP with Grok Bot, email with Instinct (section 8).
 3. **Instinct's terms constrain the design.** It is for personal use only, it forbids bots and scraping, and it makes the user responsible for what the agent signs or buys. This rules out several shortcuts (section 7).
 4. **Redis should not be the system of record.** For this volume and latency (email, minutes), Postgres alone covers memory and queue with fewer moving parts (section 4).
-5. **Orca orchestrates the build, not the runtime.** Its automations launch agents on a schedule from the app. The 24/7 bridge has to live outside the owner's Mac (sections 5 and 11).
+5. **Build tooling is not the runtime.** Desktop agent orchestrators launch agents on a schedule from a laptop. The 24/7 bridge has to live on a server (sections 5 and 11).
 
 **Proposal:** a small service (`bridge`) with Postgres, where each agent is an adapter. The bridge receives tasks, builds the context from memory, delivers the task to the other agent through the channel it has, and stores the result with its provenance. It is asynchronous, tolerates hours of delay, and has loop brakes and human approval for actions with real-world effects.
 
@@ -82,7 +82,7 @@ Shared memory and asynchronous invocation between always-on agents: Instinct and
 | Mem0, Zep, Letta | Extraction and memory models already built | Instinct cannot run their SDKs or tools. Comparisons (secondary) indicate that sharing across agents is weak in Mem0 | Not in v1 |
 | SQLite (like engram) | Very simple | Single host; weak for cross-platform access | No |
 
-**Why not Redis first.** The slowest part of the system is an agent answering an email. Saving milliseconds in the queue changes nothing, and adding a second store forces coordination of two writes. Also, the owner's current Redis runs on the owner's Mac, which is not awake 24/7.
+**Why not Redis first.** The slowest part of the system is an agent answering an email. Saving milliseconds in the queue changes nothing, and adding a second store forces coordination of two writes. Also, a Redis on a laptop is not awake 24/7.
 
 **Triggers to add Redis (any one):** more than 100 tasks per second sustained, queue p95 above 1 s due to measured contention in Postgres, or an adapter that needs real-time streaming.
 
@@ -127,7 +127,7 @@ flowchart LR
   H -- signed link --> IN
 ```
 
-**Stack:** TypeScript on Node 24, Hono, `pg` without an ORM, Zod. It runs on Vercel Hobby, with functions in region `pdx1`, next to Supabase in `aws-1-us-west-2`. The inbound email provider is chosen in M3.
+**Stack:** TypeScript on Node 24, Hono, `pg` without an ORM, Zod. It runs on Vercel Hobby, with functions in the same region as the Supabase database. The inbound email provider is chosen in M3.
 
 **No permanent process.** A function does not survive between requests, so the dispatcher is one pass per request: `POST /cron/dispatch`, with a Bearer token compared in constant time against `CRON_SECRET`, which fails closed if it is missing. `pg_cron` with `pg_net` in Supabase triggers it every minute, with the secret in Vault (`db/cron_dispatch.sql`), because Vercel cron on Hobby runs only once a day. Creating a task also dispatches right away with `waitUntil`, without waiting for the minute. If that fails, the cron picks it up. Worst-case latency is one minute and stays within the p95 in section 10. A pass with no work is a single read.
 
@@ -337,11 +337,11 @@ This is the most delicate part. Connecting two agents that have access to the ow
 - **Backup:** daily backup, with a restore tested before M5.
 - **Alerts:** stuck queue, active circuit breaker, expirations, email errors.
 
-## 11. Execution plan with Orca
+## 11. Execution plan
 
-**Role of Orca:** it coordinates the agents that build the project, in separate worktrees. The runtime does not depend on Orca or on the owner's Mac. An Orca automation is an agent launched on a schedule, useful for a daily health review, not for being the queue.
+**Build orchestration:** coding agents build the project in separate worktrees. The runtime does not depend on them or on a laptop. A scheduled agent is useful for a daily health review, not for being the queue.
 
-**Orca run:** created with these tasks and gates. See `orca orchestration task-list`.
+**Milestones:** these tasks and gates.
 
 | Task | Deliverable | Depends on | Acceptance criterion |
 |---|---|---|---|

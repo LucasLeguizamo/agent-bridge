@@ -2,17 +2,31 @@ import { randomBytes } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import pg from 'pg';
 
+const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
+
 /**
- * Every run gets its own schema in Supabase and drops it afterwards, so tests cannot reach real tables,
+ * Tests run on Supabase or on a local Postgres (contributors, CI) and refuse any other host,
+ * so a stray URL cannot point them at a real database. A local one needs test/setup.sql applied once.
+ */
+export function testDatabaseUrl() {
+  const raw = process.env.TEST_DATABASE_URL;
+  if (!raw) throw new Error('TEST_DATABASE_URL is required (local Postgres, or a Supabase session pooler or direct connection)');
+  const url = new URL(raw);
+  if (!/\.supabase\.(co|com)$/.test(url.hostname) && !LOCAL_HOSTS.includes(url.hostname)) {
+    throw new Error('TEST_DATABASE_URL must point to localhost or Supabase');
+  }
+  if (!url.searchParams.get('sslmode')) throw new Error('TEST_DATABASE_URL must set sslmode');
+  return raw;
+}
+
+/**
+ * Every run gets its own schema and drops it afterwards, so tests cannot reach real tables,
  * even though they TRUNCATE. It needs a session-mode or direct URL: a transaction pooler cannot pin search_path.
  * ponytail: a crashed run leaves its test_* schema behind; drop those by hand.
  */
 export async function openTestSchema() {
-  const raw = process.env.TEST_DATABASE_URL;
-  if (!raw) throw new Error('TEST_DATABASE_URL is required (Supabase session pooler or direct connection)');
+  const raw = testDatabaseUrl();
   const url = new URL(raw);
-  if (!/\.supabase\.(co|com)$/.test(url.hostname)) throw new Error('TEST_DATABASE_URL must point to Supabase');
-  if (!url.searchParams.get('sslmode')) throw new Error('TEST_DATABASE_URL must set sslmode');
 
   const schema = `test_${randomBytes(8).toString('hex')}`;
   const admin = new pg.Client({ connectionString: raw });

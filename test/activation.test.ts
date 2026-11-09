@@ -39,6 +39,8 @@ test('the Instinct page installs the CLI from this deployment and gives the perm
   assert.ok(body.includes(fill(CLI_BOOTSTRAP)));
   assert.ok(!body.includes('{BRIDGE}'), 'the firm limits name this bridge');
   assert.match(CLI_BOOTSTRAP, /bridge\.mjs instructions/);
+  assert.match(body, /^\s*OWNER_EMAIL\s/m, 'the owner variable is listed');
+  assert.match(body, /bridge update --sha256 <hash>/, 'updates are pinned to a hash');
 });
 
 // Audit fixes carried over from the first routine, now in the served instructions.

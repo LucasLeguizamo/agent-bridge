@@ -9,15 +9,11 @@ import pg from 'pg';
 import { migrate } from '../db/migrate.ts';
 import { smokeCheck } from '../db/smoke.ts';
 import { createApp } from '../src/http.ts';
+import { testDatabaseUrl } from './pg.ts';
 
 const DB_DIR = fileURLToPath(new URL('../db/', import.meta.url));
 
-function testUrl() {
-  const raw = process.env.TEST_DATABASE_URL;
-  if (!raw) throw new Error('TEST_DATABASE_URL is required');
-  if (!/\.supabase\.(co|com)$/.test(new URL(raw).hostname)) throw new Error('TEST_DATABASE_URL must point to Supabase');
-  return raw;
-}
+const testUrl = testDatabaseUrl;
 
 describe('GET /health', () => {
   const keys = { grok: 'g'.repeat(32) };

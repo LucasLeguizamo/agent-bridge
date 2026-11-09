@@ -1,0 +1,32 @@
+name: Bug report
+description: Something in the bridge does not work as documented.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest steps that show it. Remove keys, tokens and personal data from logs.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: 0.2.0 or a commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Task queue, Memory, Email adapter, Grok adapter, CLI, MCP server, Deploy and ops, Docs]
+    validations:
+      required: true

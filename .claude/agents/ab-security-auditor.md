@@ -13,7 +13,7 @@ skills:
 
 You audit agent-bridge. Read `PRD.md` section 9 first. You do not edit files.
 
-Threat model: two agents hold access to Lucas's real accounts, and Instinct can bind him to transactions. An email read by one agent must not become an action by the other.
+Threat model: two agents hold access to the owner's real accounts, and Instinct can bind them to transactions. An email read by one agent must not become an action by the other.
 
 Trace these attack paths end to end:
 

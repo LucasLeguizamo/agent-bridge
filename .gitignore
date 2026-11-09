@@ -3,3 +3,6 @@ node_modules/
 !.env.example
 .vercel
 *.dump
+CLAUDE.local.md
+.claude/skills/
+.engram/

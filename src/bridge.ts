@@ -36,7 +36,7 @@ export function createBridge(env: Env, { defer = waitUntil as (p: Promise<unknow
   }
   const email = emailConfig(env);
   if (!email && EMAIL_ENV.some((name) => env[name])) {
-    console.warn(`Email adapter not loaded: ${EMAIL_ENV.join(', ')} must all be set`);
+    console.warn(`Email adapter not loaded: ${[...EMAIL_ENV, 'OWNER_EMAIL'].join(', ')} must all be set`);
   }
   if (!env.DATABASE_CA_PEM) console.warn('DATABASE_URL uses sslmode=require: encrypted, but the server is not verified');
 
