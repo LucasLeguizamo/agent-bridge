@@ -6,6 +6,7 @@ import { routePath } from 'hono/route';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { mountActivation } from './activation.ts';
+import { fill, instructionsFor, versionOf } from './instructions.ts';
 import { claimReply, pendingTasks, PendingInput } from './claim.ts';
 import { logError } from './log.ts';
 import { ContextPackInput, contextPack, DATA_LABEL, memoryEvents, MemoryEventsInput, memoryHistory, MemoryHistoryInput, memoryLog, MemoryLogInput,
@@ -117,6 +118,16 @@ export function createApp(pool: Pool, keys: Record<string, string>, options: App
   };
 
   app.get('/whoami', (c) => c.json({ agent: c.get('agent') }));
+
+  // The agent's working instructions, fetched at the start of every run: a deploy updates every agent at once.
+  app.get('/instructions', async (c) => {
+    const { rows } = await pool.query<{ id: string; adapter: string }>('SELECT id, adapter FROM agent WHERE enabled ORDER BY id');
+    const self = rows.find((r) => r.id === c.get('agent'));
+    if (!self) return c.json({ error: 'agent_disabled' }, 403);
+    const others = rows.filter((r) => r !== self).map((r) => r.id);
+    const text = fill(instructionsFor(self.adapter), new URL(c.req.url).origin, others);
+    return c.json({ agent: self.id, version: versionOf(text), text });
+  });
 
   app.post('/tasks', async (c) => {
     const { task, created } = await createTask(pool, c.get('agent'), await parse(NewTaskBody, c.req));

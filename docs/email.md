@@ -1,135 +1,140 @@
-# Correo e Instinct (M3)
+# Email and Instinct (M3)
 
-Guía para Lucas. **G1 todavía no se hizo y no hubo ningún correo real**: todo se probó con webhooks firmados falsos y una API de Resend simulada. Lo marcado **[G1]** es un supuesto que falta confirmar.
+Guide for the owner. **G1 has not been done and no real email has been sent**: everything was tested with fake signed webhooks and a simulated Resend API. Items marked **[G1]** are assumptions that still need confirmation.
 
-## Cómo funciona
+## How it works
 
-| Función | Mecanismo |
+| Function | Mechanism |
 |---|---|
-| A quién va | La dirección: `bridge+<token>@` es una respuesta, `bridge+grok@` es una delegación |
-| Quién lo autorizó | Remitente en lista permitida, veredictos SPF, DKIM y DMARC en `pass`, y el token HMAC en las respuestas |
-| A qué tarea pertenece | El flag `[task:xxxxxxxx]` del asunto. Solo correlaciona: nunca autoriza nada |
+| Where it goes | The address: `bridge+<token>@` is a reply, `bridge+grok@` is a delegation |
+| Who authorized it | Sender on the allow list, SPF, DKIM and DMARC verdicts all `pass`, and the HMAC token on replies |
+| Which task it belongs to | The `[task:xxxxxxxx]` flag in the subject. It only correlates: it never authorizes anything |
 
-**Puente hacia Instinct.** El correo va a `INSTINCT_EMAIL` con Lucas en copia. El `Reply-To` lleva el token firmado, y el pedido y la memoria van etiquetados como datos, cada uno en una línea. Si la tarea contiene un secreto, no sale: queda `failed` con una alerta. Si el secreto está en la memoria, sale sin ese contexto. Una tarea `side_effect` no se envía sin aprobación.
+**Bridge to Instinct.** The email goes to `INSTINCT_EMAIL`, with the owner (`OWNER_EMAIL`) in Cc. `Reply-To` carries the signed token. The request and the memory are labeled as data, each on its own line. If the task contains a secret, it does not leave: the task ends `failed` with an alert. If the secret is in the memory, the email goes out without that context. A `side_effect` task is not sent without approval. Instinct does read tasks without asking, and the owner is notified after. Only `side_effect` tasks wait, and the bridge holds them.
 
-**Respuesta de Instinct.** Cierra la tarea con `finishTask`. Cada línea `MEMORY: clave = valor` pasa por `memoryWrite`, como hecho `unverified` con origen. El texto siempre queda en un evento `email_reply`. Sin líneas `MEMORY:` no se crea ningún hecho. Cada tarea acepta una sola respuesta.
+**Instinct's reply.** It closes the task with `finishTask`. Each `MEMORY: key = value` line goes through `memoryWrite`, as an `unverified` fact with its source. The text is always kept in an `email_reply` event. Without `MEMORY:` lines, no fact is created. Each task accepts only one reply.
 
-**Delegación de Instinct.** Un correo a `bridge+grok@` crea una tarea con `createTask`, con sus frenos de saltos, tope diario y duplicados. El puente fija `to_agent`, el intent `research` y por lo tanto el riesgo: el contenido del correo no los elige. Un texto de más de 10.000 caracteres no cumple la política y queda como `side_effect`, esperando aprobación. Cuando la tarea termina, el resultado vuelve por el mismo hilo, sin token, así que responderlo no crea nada. Una tarea rechazada por los frenos no manda correo, para no alimentar un bucle.
+**Instinct's delegation.** An email to `bridge+grok@` creates a task with `createTask`, with its hop limit, daily cap and duplicate checks. The bridge sets `to_agent`, the `research` intent and therefore the risk: the email content does not choose them. Text over 10,000 characters does not meet the policy and becomes `side_effect`, waiting for approval. When the task finishes, the result returns on the same thread, without a token, so replying to it creates nothing. A task rejected by the limits sends no email, so it does not feed a loop.
 
-## Proveedor: Resend
+## Provider: Resend
 
 | | Resend | Mailgun | Postmark | SendGrid | Amazon SES |
 |---|---|---|---|---|---|
-| Entrada por webhook | Sí, solo metadatos; el cuerpo se pide a la API | Sí, con el cuerpo | Sí, con el cuerpo | Sí, multipart | No directo: SNS, S3 o Lambda |
-| Webhook firmado | Sí (Svix, HMAC sobre todo el cuerpo) | Sí. En form firma solo `timestamp` y `token`; en JSON, el cuerpo | **No**: Basic Auth e IP | Sí (ECDSA, con política aparte) | SNS firmado con certificado |
-| Veredictos | Sí: `authentication.spf`, `dkim`, `dmarc`, documentados | Anunciados en mayo de 2026, sin nombres de campo documentados | Solo cabeceras de SpamAssassin, sin DMARC | `SPF` y `dkim`, sin DMARC como campo | Sí: los más completos |
-| Hilos | `message_id`, `In-Reply-To` y `References` documentados | Por cabeceras | Por cabeceras | Por cabeceras | Hay que parsear MIME |
-| Gratis | 100 al día, 3.000 al mes, con entrada incluida | 100 al día, 1 ruta de entrada, 1 día de registros | No revisado: descartado | No revisado | No revisado |
+| Inbound by webhook | Yes, metadata only; the body is fetched from the API | Yes, with the body | Yes, with the body | Yes, multipart | Not direct: SNS, S3 or Lambda |
+| Signed webhook | Yes (Svix, HMAC over the whole body) | Yes. In form mode it signs only `timestamp` and `token`; in JSON, the body | **No**: Basic Auth and IP | Yes (ECDSA, with a separate policy) | SNS signed with a certificate |
+| Verdicts | Yes: `authentication.spf`, `dkim`, `dmarc`, documented | Announced in May 2026, no documented field names | SpamAssassin headers only, no DMARC | `SPF` and `dkim`, no DMARC field | Yes: the most complete |
+| Threads | `message_id`, `In-Reply-To` and `References` documented | By headers | By headers | By headers | MIME must be parsed |
+| Free tier | 100 per day, 3,000 per month, inbound included | 100 per day, 1 inbound route, 1 day of logs | Not reviewed: discarded | Not reviewed | Not reviewed |
 
-**Por qué Resend:** es el único con webhook firmado y veredictos DKIM y DMARC documentados en un JSON simple, sin AWS ni parseo de MIME. Sirve en serverless porque el webhook es corto. **Plan B:** SES, si Resend falla en la prueba real. Mailgun queda como alternativa solo si documenta los campos.
+**Why Resend:** it is the only one with a signed webhook and documented DKIM and DMARC verdicts in simple JSON, with no AWS and no MIME parsing. It works in serverless because the webhook is short. **Plan B:** SES, if Resend fails the real test. Mailgun is an alternative only if it documents the fields.
 
-Límites de Resend: cada correo recibido cuenta en la cuota, y como el dominio recibe en cualquier dirección, el spam también gasta. Por eso conviene usar un subdominio poco visible. La API permite 10 solicitudes por segundo. No se usa el SDK: una verificación de firma y tres llamadas no justifican una dependencia.
+Resend limits: every received email counts against the quota, and because the domain receives at any address, spam also spends it. Use a low-profile subdomain. The API allows 10 requests per second. The SDK is not used: one signature check and three calls do not justify a dependency.
 
-El cambio de proveedor se limita a `EmailProvider` en `src/email.ts`: `parseWebhook`, `fetchInbound` y `send`.
+A provider change is limited to `EmailProvider` in `src/email.ts`: `parseWebhook`, `fetchInbound` and `send`.
 
 ## Variables
 
-Sin las siete, el adaptador no carga y las tareas de Instinct quedan en cola sin gastar intentos.
+Without all six (the five above and `OWNER_EMAIL`), the adapter does not load and Instinct tasks stay queued without spending attempts.
 
-| Variable | Qué es |
+| Variable | What it is |
 |---|---|
-| `RESEND_API_KEY` | Clave de la API. Enviar y leer lo recibido |
-| `RESEND_WEBHOOK_SECRET` | Secreto de firma del webhook, `whsec_...` |
-| `EMAIL_DOMAIN` | Subdominio del puente, por ejemplo `bridge.tudominio.com` |
-| `EMAIL_TOKEN_SECRET` | Aleatorio, 32 caracteres o más: `openssl rand -hex 32` |
-| `INSTINCT_EMAIL` | Dirección a la que el puente le escribe a Instinct |
-| `EMAIL_ALLOWED_SENDERS` | Direcciones desde las que Instinct escribe, separadas por comas. Coincidencia exacta. La de Lucas se rechaza al arrancar |
-| `LUCAS_EMAIL` | Va en copia de todo. No hay opción para quitarla |
+| `RESEND_API_KEY` | API key. Send mail and read received mail |
+| `RESEND_WEBHOOK_SECRET` | Webhook signing secret, `whsec_...` |
+| `EMAIL_DOMAIN` | Bridge subdomain, for example `bridge.yourdomain.com` |
+| `EMAIL_TOKEN_SECRET` | Random, 32 characters or more: `openssl rand -hex 32` |
+| `INSTINCT_EMAIL` | Address the bridge writes to for Instinct |
 
-Rotar `EMAIL_TOKEN_SECRET` invalida los tokens de las tareas abiertas: sus respuestas irán a cuarentena hasta que venzan, a las 24 h.
+Optional:
 
-## Esquema
+| Variable | What it is |
+|---|---|
+| `EMAIL_ALLOWED_SENDERS` | Addresses Instinct writes from, comma-separated. Exact match. Defaults to `INSTINCT_EMAIL`. The owner's address is rejected at startup |
+| `OWNER_EMAIL` | Required. The owner, in Cc of each email. Agents work without asking, so this is the supervision |
 
-`db/004_email.sql` es aditivo y **no está aplicado en vivo**. Se aplica con `pnpm db:migrate`, previo backup.
+Rotating `EMAIL_TOKEN_SECRET` invalidates the tokens of open tasks: their replies go to quarantine until the tasks expire, after 24 h.
 
-- Registra `instinct` con el adaptador `email`, sin tocar `enabled`, que es el kill switch.
-- `email_inbound`: una fila por correo recibido, con su estado y motivo. La clave `(provider, provider_id)` hace idempotente la reentrega. No guarda cuerpos: el de un correo en cuarentena queda solo en Resend (30 días en el plan gratis).
-- `email_outbound`: lo enviado, para el hilo y la auditoría.
+## Schema
 
-## Cuarentena
+`db/004_email.sql` is additive and **is not applied live**. Apply it with `pnpm db:migrate`, after a backup.
 
-Un webhook sin firma válida recibe `401` y no deja nada. Uno firmado cuyo correo no pasa los controles recibe `200`, para que el proveedor no reintente, y queda en cuarentena sin parsearse.
+- It registers `instinct` with the `email` adapter, without touching `enabled`, which is the kill switch.
+- `email_inbound`: one row per received email, with its status and reason. The `(provider, provider_id)` key makes redelivery idempotent. It stores no bodies: the body of a quarantined email stays only in Resend (30 days on the free plan).
+- `email_outbound`: what was sent, for threading and audit.
+
+## Quarantine
+
+A webhook without a valid signature gets `401` and leaves nothing. A signed webhook whose email fails the checks gets `200`, so the provider does not retry, and the email goes to quarantine without being parsed.
 
 ```sql
 SELECT received_at, reason, sender, subject, verdicts, provider_id
 FROM bridge.email_inbound WHERE status = 'quarantined' ORDER BY received_at DESC LIMIT 50;
 ```
 
-| Motivo | Significa |
+| Reason | Meaning |
 |---|---|
-| `sender_not_allowed` | Remitente fuera de la lista, o `From` ambiguo |
-| `auth_failed` | SPF, DKIM o DMARC distinto de `pass`, o sin veredicto |
-| `no_token` | Sin `bridge+...`: por ejemplo, respondió a `From` en vez de `Reply-To` |
-| `invalid_token` | Token alterado, o destino de delegación no permitido |
-| `ambiguous_route` | Más de un `bridge+...` distinto |
-| `no_text_body` | Sin parte de texto plano |
-| `too_large`, `invalid_text` | Más de 64.000 caracteres, o con caracteres NUL |
-| `secret` | El filtro de secretos encontró algo. Puede ser falso positivo, como un hash largo |
-| `task_not_open` | La tarea venció, se cerró o ya tuvo su respuesta |
-| `task_refused:<código>` | `createTask` rechazó la delegación |
+| `sender_not_allowed` | Sender not on the list, or ambiguous `From` |
+| `auth_failed` | SPF, DKIM or DMARC is not `pass`, or there is no verdict |
+| `no_token` | No `bridge+...`: for example, the reply went to `From` instead of `Reply-To` |
+| `invalid_token` | Tampered token, or a delegation target that is not allowed |
+| `ambiguous_route` | More than one distinct `bridge+...` |
+| `no_text_body` | No plain-text part |
+| `too_large`, `invalid_text` | More than 64,000 characters, or contains NUL characters |
+| `secret` | The secret filter found something. It may be a false positive, such as a long hash |
+| `task_not_open` | The task expired, closed, or already got its reply |
+| `task_refused:<code>` | `createTask` rejected the delegation |
 
-Nada sale de cuarentena solo. Para revisar un cuerpo, míralo en Resend con `provider_id`.
+Nothing leaves quarantine on its own. To review a body, look it up in Resend with `provider_id`.
 
-## Qué debe confirmar G1
+## What G1 must confirm
 
-Las pruebas son las de la sección 11 del PRD. El adaptador depende además de estos puntos:
+The tests are the ones in PRD section 11. The adapter also depends on these points:
 
-1. **[G1]** ¿Instinct responde a correo automatizado de un remitente que no es Lucas? Si no, M3 no sirve y toca el plan B de la sección 7.
-2. **[G1]** ¿Responde al `Reply-To`, conservando el `+token` exacto? Si responde a `From`, todo cae en `no_token`.
-3. **[G1]** ¿Desde qué dirección escribe? ¿Es la misma a la que se le envía? Define `EMAIL_ALLOWED_SENDERS`.
-4. **[G1]** ¿Sus correos llegan con SPF, DKIM y DMARC en `pass`? El control es estricto. Si DMARC llega `gray` porque su dominio usa `p=none`, todo cae en `auth_failed`. Relajarlo es una decisión de seguridad, no un ajuste: requiere que lo apruebes.
-5. **[G1]** ¿Envía una parte `text/plain`? Si solo manda HTML, todo cae en `no_text_body`.
-6. **[G1]** ¿Respeta `MEMORY:` al inicio de la línea, en 5 de 5, sin viñetas ni negritas? El parser no lo adivina: esas líneas no crean hechos. Mira `memory_lines` en `email_reply` para la regla del 20 % de la sección 7.
-7. **[G1]** ¿Manda una sola respuesta por tarea? La primera cierra la tarea. Un "te aviso cuando termine" cerraría la tarea con ese texto, y la respuesta real iría a cuarentena.
-8. **[G1]** ¿Puede escribir por su cuenta a `bridge+grok@`? ¿Conserva el `+` en la dirección? ¿Mantiene el hilo cuando se le responde?
-9. **[G1]** ¿Obedece lo que llega como dato (prueba 5, PLÁTANO)? Si sí, el riesgo es real y `side_effect` no se relaja.
-10. Los términos no aclaran el envío automatizado. El borrador para `comms@instinct.com` de la sección 7 lo envías tú.
+1. **[G1]** Does Instinct reply to automated email from a sender that is not the owner? If not, M3 is useless and plan B in section 7 applies.
+2. **[G1]** Does it reply to `Reply-To`, keeping the exact `+token`? If it replies to `From`, everything lands in `no_token`.
+3. **[G1]** Which address does it write from? Is it the same one it is sent to? This sets `EMAIL_ALLOWED_SENDERS`.
+4. **[G1]** Do its emails arrive with SPF, DKIM and DMARC all `pass`? The check is strict. If DMARC arrives `gray` because its domain uses `p=none`, everything lands in `auth_failed`. Relaxing it is a security decision, not a tuning step: the owner must approve it.
+5. **[G1]** Does it send a `text/plain` part? If it sends only HTML, everything lands in `no_text_body`.
+6. **[G1]** Does it put `MEMORY:` at the start of the line, 5 out of 5 times, without bullets or bold? The parser does not guess: those lines create no facts. Check `memory_lines` in `email_reply` for the 20% rule in section 7.
+7. **[G1]** Does it send only one reply per task? The first reply closes the task. An "I'll let you know when done" would close the task with that text, and the real reply would go to quarantine.
+8. **[G1]** Can it write to `bridge+grok@` on its own? Does it keep the `+` in the address? Does it keep the thread when it is answered?
+9. **[G1]** Does it obey what arrives as data (test 5, BANANA)? If so, the risk is real and `side_effect` is not relaxed.
+10. The terms do not address automated sending. The owner sends the draft for `comms@instinct.com` from section 7.
 
-## Lo que requiere un buzón real
+## What needs a real mailbox
 
-Nada de esto se probó. Hazlo con un buzón de prueba como remitente permitido, nunca el tuyo, antes de usar a Instinct:
+None of this was tested. Do it with a test mailbox as the allowed sender, never the owner's own, before using Instinct:
 
-1. Que Resend entregue `bridge+<52 caracteres>@` y `bridge+grok@` al webhook. Su documentación dice "cualquier dirección del dominio", sin mencionar el `+`.
-2. Que el payload real coincida con su referencia, y que `authentication` traiga los tres veredictos. `headers.from` debe coincidir con `from`, también con nombres codificados, o el correo cae en `sender_not_allowed`.
-3. Que un correo falsificado desde un dominio ajeno llegue con el veredicto correcto y quede en cuarentena.
-4. Que `GET /emails/{id}` ya tenga `message_id` justo después de enviar. Si no, solo se pierde el hilo de la siguiente tarea, no la respuesta.
-5. Que `In-Reply-To` y `References` agrupen el hilo en un cliente real, y que Lucas reciba la copia.
-6. La firma real de un webhook, y un reintento forzado respondiendo `503`.
+1. Resend delivers `bridge+<52 characters>@` and `bridge+grok@` to the webhook. Its documentation says "any address on the domain" and does not mention `+`.
+2. The real payload matches its reference, and `authentication` carries all three verdicts. `headers.from` must match `from`, also with encoded names, or the email lands in `sender_not_allowed`.
+3. A spoofed email from a foreign domain arrives with the correct verdict and goes to quarantine.
+4. `GET /emails/{id}` already has `message_id` right after sending. If not, only the next task's thread is lost, not the reply.
+5. `In-Reply-To` and `References` group the thread in a real client, and the owner receives the Cc copy.
+6. The real signature of a webhook, and a forced retry by answering `503`.
 
-Este es el criterio de M3 "ida y vuelta real con buzón de prueba", y sigue pendiente.
+This is the M3 criterion "real round trip with a test mailbox", and it is still pending.
 
-## Pasos a mano
+## Manual steps
 
-1. G1, en especial los puntos de arriba.
-2. Cuenta de Resend y subdominio dedicado, con sus registros DNS de envío y el MX de recepción.
-3. Webhook de `email.received` hacia `https://<host>/webhooks/email`, sin protección de despliegue en esa URL.
-4. Las variables de arriba en el host, y `pnpm db:migrate`.
-5. La prueba con buzón real.
-6. El opt-out en `app.instinct.com/settings`, y enseñarle a Instinct el texto de `/activate/instinct`.
+1. G1, especially the points above.
+2. A Resend account and a dedicated subdomain, with its sending DNS records and the receiving MX.
+3. An `email.received` webhook to `https://<host>/webhooks/email`, with no deployment protection on that URL.
+4. The variables above on the host, and `pnpm db:migrate`.
+5. The test with a real mailbox.
+6. The opt-out in `app.instinct.com/settings`, and teaching Instinct the text at `/activate/instinct`.
 
-## Límites conocidos
+## Known limits
 
-- **Vercel Hobby:** su cron corre solo una vez al día, así que el envío depende de `POST /cron/dispatch` por minuto desde `db/cron_dispatch.sql` (pg_cron en Supabase, ver el runbook). Sin ese paso manual, una tarea para Instinct o un resultado puede no salir. Cada pasada también envía los resultados pendientes. La recepción no depende del cron.
-- **El puente no controla a Instinct.** Controla lo que le pide, no lo que hace con sus cuentas. Un texto hostil en `research` sigue siendo texto: el destinatario debe tratarlo como dato.
-- **Aprobaciones:** una tarea `side_effect` no sale sin una aprobación vigente en `approval`. La cola la retiene y el adaptador lo revisa otra vez. Sin aprobación, vence a las 24 h.
-- **Una respuesta solo cierra como `completed`.** Por correo no hay forma de marcarla `failed`.
-- **Hechos sobrescribibles:** una respuesta válida con una clave existente reemplaza el valor actual, como `unverified`, y el anterior queda en el historial. Un hecho `verified` no se puede reemplazar: esa línea se cuenta como rechazada.
-- **Spam:** cada correo al dominio cuesta una llamada a la API, una fila y un evento. Sin retención automática.
+- **Vercel Hobby:** its cron runs only once a day, so sending depends on a per-minute `POST /cron/dispatch` from `db/cron_dispatch.sql` (pg_cron in Supabase, see the runbook). Without that manual step, a task for Instinct or a result may not go out. Each pass also sends pending results. Receiving does not depend on the cron.
+- **The bridge does not control Instinct.** It controls what it asks, not what Instinct does with its accounts. Hostile text in `research` is still text: the recipient must treat it as data.
+- **Approvals:** a `side_effect` task does not leave without a current approval in `approval`. The queue holds it and the adapter checks again. Without approval, it expires after 24 h.
+- **A reply only closes as `completed`.** There is no way to mark it `failed` by email.
+- **Overwritable facts:** a valid reply with an existing key replaces the current value, as `unverified`, and the previous value stays in the history. A `verified` fact cannot be replaced: that line counts as rejected.
+- **Spam:** each email to the domain costs one API call, one row and one event. There is no automatic retention.
 
-## Nunca
+## Never
 
-Automatizar iMessage, WhatsApp o SMS desde tu cuenta. Hacer scraping o ingeniería inversa de `app.instinct.com`. Pasar credenciales, datos de clientes o datos de FreeTicket por este canal.
+Automate iMessage, WhatsApp or SMS from your account. Scrape or reverse-engineer `app.instinct.com`. Pass credentials or customer data through this channel.
 
-## Fuentes
+## Sources
 
-Revisadas el 7-nov-2026. Resend: [recepción](https://resend.com/docs/dashboard/receiving/introduction), [correo recibido](https://resend.com/docs/api-reference/emails/retrieve-received-email), [evento `email.received`](https://resend.com/docs/webhooks/emails/received), [hilos](https://resend.com/docs/dashboard/receiving/reply-to-emails), [idempotencia](https://resend.com/docs/dashboard/emails/idempotency-keys), [reintentos](https://resend.com/docs/dashboard/webhooks/retries-and-replays), [precios](https://resend.com/pricing), [cuotas](https://resend.com/docs/knowledge-base/account-quotas-and-limits). [Svix: verificación manual](https://docs.svix.com/receiving/verifying-payloads/how-manual). [Mailgun: entrada](https://documentation.mailgun.com/docs/mailgun/user-manual/receive-forward-store/receive-http), [firma](https://documentation.mailgun.com/docs/mailgun/user-manual/webhooks/securing-webhooks), [veredictos](https://www.mailgun.com/?p=13451), [precios](https://www.mailgun.com/pricing/). [Postmark: webhooks](https://postmarkapp.com/developer/webhooks/webhooks-overview). [SendGrid: Inbound Parse](https://www.twilio.com/docs/sendgrid/for-developers/parsing-email/setting-up-the-inbound-parse-webhook), [firma](https://www.twilio.com/docs/sendgrid/for-developers/parsing-email/securing-your-parse-webhooks). [SES: notificaciones](https://docs.aws.amazon.com/ses/latest/dg/receiving-email-notifications-contents.html). [Vercel: cron](https://vercel.com/docs/cron-jobs/usage-and-pricing).
+Reviewed on 2026-11-07. Resend: [receiving](https://resend.com/docs/dashboard/receiving/introduction), [received email](https://resend.com/docs/api-reference/emails/retrieve-received-email), [`email.received` event](https://resend.com/docs/webhooks/emails/received), [threads](https://resend.com/docs/dashboard/receiving/reply-to-emails), [idempotency](https://resend.com/docs/dashboard/emails/idempotency-keys), [retries](https://resend.com/docs/dashboard/webhooks/retries-and-replays), [pricing](https://resend.com/pricing), [quotas](https://resend.com/docs/knowledge-base/account-quotas-and-limits). [Svix: manual verification](https://docs.svix.com/receiving/verifying-payloads/how-manual). [Mailgun: inbound](https://documentation.mailgun.com/docs/mailgun/user-manual/receive-forward-store/receive-http), [signing](https://documentation.mailgun.com/docs/mailgun/user-manual/webhooks/securing-webhooks), [verdicts](https://www.mailgun.com/?p=13451), [pricing](https://www.mailgun.com/pricing/). [Postmark: webhooks](https://postmarkapp.com/developer/webhooks/webhooks-overview). [SendGrid: Inbound Parse](https://www.twilio.com/docs/sendgrid/for-developers/parsing-email/setting-up-the-inbound-parse-webhook), [signing](https://www.twilio.com/docs/sendgrid/for-developers/parsing-email/securing-your-parse-webhooks). [SES: notifications](https://docs.aws.amazon.com/ses/latest/dg/receiving-email-notifications-contents.html). [Vercel: cron](https://vercel.com/docs/cron-jobs/usage-and-pricing).
