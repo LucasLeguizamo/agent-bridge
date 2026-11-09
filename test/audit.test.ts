@@ -337,10 +337,15 @@ describe('M4: size and rate caps', () => {
   });
 
   test('absurdly deep input is a clean 400', async () => {
-    let deep: unknown = 'x';
-    for (let i = 0; i < 5000; i++) deep = [deep];
-    const r = await call('instinct', 'POST', '/tasks', newTask({ input: { deep } }));
-    assert.equal(r.status, 400);
+    // Built as text: JSON.stringify on 5000 levels overflows the test's own stack on Linux runners.
+    const deep = `${'['.repeat(5000)}"x"${']'.repeat(5000)}`;
+    const body = JSON.stringify(newTask({ input: { deep: '@' } })).replace('"@"', deep);
+    const res = await app.request('/tasks', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${KEYS.instinct}`, 'content-type': 'application/json' },
+      body,
+    });
+    assert.equal(res.status, 400);
   });
 
   test('memory writes stop at the hourly cap for that agent only', async () => {
