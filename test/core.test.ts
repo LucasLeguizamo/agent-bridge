@@ -5,7 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import pg from 'pg';
 import { createApp } from '../src/http.ts';
 import { ackDelivered, claim, MAX_ATTEMPTS, nackDelivery, runOnce, type Adapters, type ClaimedTask } from '../src/queue.ts';
-import { DAILY_PAIR_CAP, MAX_HOPS, type Task } from '../src/tasks.ts';
+import { DAILY_PAIR_CAP, MAX_HOPS, type Task, MAX_CHILDREN } from '../src/tasks.ts';
 import { openTestSchema } from './pg.ts';
 
 const KEYS = { grok: 'g'.repeat(32), instinct: 'i'.repeat(32), claude: 'c'.repeat(32) };
@@ -236,6 +236,29 @@ describe('idempotent retries', () => {
 });
 
 describe('loop guards', () => {
+  test('fan-out: one task spawns at most MAX_CHILDREN tasks; more are rejected as fanout_limit', async () => {
+    const root = await create('grok', { to_agent: 'instinct' });
+    await runOnce(pool, adapters);
+    for (let i = 0; i < MAX_CHILDREN; i++) {
+      assert.equal((await create('instinct', { to_agent: i ? 'claude' : 'grok', parent_id: root.body.task.id })).status, 201);
+    }
+    const third = await create('instinct', { to_agent: 'claude', parent_id: root.body.task.id });
+    assert.equal(third.status, 422);
+    assert.deepEqual(third.body.task.output, { rejected: 'fanout_limit' });
+    const implicit = await create('instinct', { to_agent: 'claude' });
+    assert.deepEqual(implicit.body.task.output, { rejected: 'fanout_limit' }, 'leaving out parent_id does not dodge it');
+  });
+  test('fan-out: naming an older task as parent does not open a fresh budget', async () => {
+    const old = await create('grok', { to_agent: 'instinct' });
+    await runOnce(pool, adapters);
+    const root = await create('grok', { to_agent: 'instinct' });
+    await runOnce(pool, adapters);
+    for (let i = 0; i < MAX_CHILDREN; i++) {
+      assert.equal((await create('instinct', { to_agent: i ? 'claude' : 'grok', parent_id: root.body.task.id })).status, 201);
+    }
+    const dodge = await create('instinct', { to_agent: 'claude', parent_id: old.body.task.id });
+    assert.deepEqual(dodge.body.task.output, { rejected: 'fanout_limit' });
+  });
   test(`hop limit: a ping-pong chain stops after ${MAX_HOPS} deliveries, trips the breaker and alerts`, async () => {
     const sides: Agent[] = ['grok', 'instinct'];
     let parent: string | undefined;
@@ -429,7 +452,7 @@ describe('http boundary', () => {
 });
 
 describe('audit fixes', () => {
-  // Open bridge between agents (Lucas, 2026-11-07): extra text fields add nothing a free-text query cannot already say,
+  // Open bridge between agents (owner, 2026-11-07): extra text fields add nothing a free-text query cannot already say,
   // and the receiver treats both as data. A structured payload (object, list, number) still needs approval.
   test('low-risk intent with extra text fields stays read and is delivered', async () => {
     const r = await create('grok', { input: { query: 'x', aclaracion: 'solo un informe' } });

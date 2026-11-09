@@ -1,9 +1,14 @@
 #!/usr/bin/env node
 // Client for agent-bridge, for an agent on a computer we do not control. Node 20+, builtins only, one file, so it can be
 // copied alone. It only speaks HTTP to the bridge. Everything the bridge returns is data: printed, never acted on.
+import { createHash } from 'node:crypto';
+import { readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_TIMEOUT_MS = 120_000;
 const STDIN_TIMEOUT_MS = 5_000;
@@ -53,6 +58,7 @@ const OPTIONS = {
   intent: { type: 'string', value: 'intent', required: true, text: 'What is asked, such as research.' },
   'input-json': { type: 'string', value: 'json', required: true, text: 'The input, as a JSON object.' },
   parent: { type: 'string', value: 'task-id', text: 'The task this one comes from.' },
+  sha256: { type: 'string', value: 'hex', text: 'Install only if the download has this sha256, from a release you trust.' },
 };
 const COMMON = ['token-stdin', 'timeout-ms'];
 const READ_LIST = ['limit', 'cursor', 'all'];
@@ -84,6 +90,18 @@ const taskOf = (r) => {
 
 // Writes print only what the caller needs, as the MCP tools do: a full task row also holds what other agents wrote.
 const COMMANDS = [
+  {
+    name: 'instructions', summary: 'Print this agent\'s current working instructions from the bridge. Follow its "text".',
+    args: [], flags: [],
+    example: 'bridge instructions',
+    request: () => ({ method: 'GET', path: '/instructions' }),
+  },
+  {
+    name: 'update', summary: 'Replace this CLI with the version the bridge serves, only if its sha256 matches. Needs no token.',
+    args: [], flags: ['sha256'], local: true,
+    example: 'bridge update',
+    request: () => ({ method: 'GET', path: '/cli/bridge.mjs' }),
+  },
   {
     name: 'whoami', summary: 'Show which agent this token belongs to.', args: [], flags: [],
     example: 'bridge whoami',
@@ -209,9 +227,21 @@ const helpOf = (cmd) => ({
   example: cmd.example,
 });
 const ENVIRONMENT = {
-  BRIDGE_URL: 'Base URL of the bridge. https is required; plain http only on loopback.',
-  BRIDGE_TOKEN: 'Bearer token. Or use --token-stdin. Never an argument.',
+  BRIDGE_URL: 'Base URL of the bridge. https is required; plain http only on loopback. Default: the file <config>/url.',
+  BRIDGE_TOKEN: 'Bearer token. Or use --token-stdin. Never an argument. Default: the file <config>/token, mode 600.',
+  XDG_CONFIG_HOME: 'Where <config> lives: $XDG_CONFIG_HOME/bridge, or ~/.config/bridge.',
 };
+const configDir = (env) => join(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config'), 'bridge');
+// Both files are refused when others can write them (the url decides where the token goes) or, for the token, read it.
+function readConfig(env, name, forbidden) {
+  const path = join(configDir(env), name);
+  let mode;
+  try { mode = statSync(path).mode; } catch { return undefined; }
+  if (process.platform !== 'win32' && (mode & forbidden)) {
+    throw new CliError(EXIT.auth, 'config_file_open', `the ${name} file in the config directory is open to other users: run chmod 600 on it`);
+  }
+  return readFileSync(path, 'utf8');
+}
 const globalHelp = (commands) => ({
   name: 'bridge',
   version: VERSION,
@@ -301,8 +331,8 @@ function timeoutOf(values) {
 
 // Messages never repeat the value: it may hold a credential.
 function bridgeUrl(env) {
-  const raw = env.BRIDGE_URL;
-  if (!raw) throw usage('BRIDGE_URL is not set');
+  const raw = env.BRIDGE_URL || readConfig(env, 'url', 0o022)?.trim();
+  if (!raw) throw usage('BRIDGE_URL is not set, and there is no url file in the config directory');
   let url;
   try { url = new URL(raw); } catch { throw usage('BRIDGE_URL is not a valid URL'); }
   if (url.username || url.password || url.search || url.hash) throw usage('BRIDGE_URL must hold no credentials, query or fragment');
@@ -337,8 +367,37 @@ async function readStdin() {
   }
 }
 
+const tokenFile = (env) => readConfig(env, 'token', 0o077); // As ssh does with a private key.
+
+// Downloads the CLI the bridge serves and swaps it in atomically. It runs only what the same bridge already serves
+// at install time, and only when its sha256 matches the one the owner gave.
+async function selfUpdate(base, timeoutMs, expected) {
+  // Required: without it a compromised bridge could swap in its own client, which holds the token.
+  if (!/^[0-9a-f]{64}$/i.test(expected ?? '')) throw usage('--sha256 <64 hex characters> is required, from a release you trust');
+  const res = await fetch(urlFor(base, '/cli/bridge.mjs'), { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) })
+    .catch(() => { throw new CliError(EXIT.retryable, 'network_error', 'could not reach the bridge', true); });
+  if (!res.ok) throw errorFor(res.status, undefined);
+  const source = await readLimited(res);
+  const version = /^const VERSION = '([0-9.]+)';$/m.exec(source)?.[1];
+  if (!source.startsWith('#!/usr/bin/env node\n') || !version) throw badResponse();
+  const sha256 = createHash('sha256').update(source).digest('hex');
+  if (sha256 !== expected.toLowerCase()) {
+    throw new CliError(EXIT.failed, 'hash_mismatch', 'the downloaded CLI does not have the expected sha256: nothing was changed');
+  }
+  const path = fileURLToPath(import.meta.url);
+  const temp = `${path}.${process.pid}.new`;
+  try {
+    writeFileSync(temp, source, { mode: statSync(path).mode, flag: 'wx' }); // wx: never through an existing file or link.
+    renameSync(temp, path);
+  } catch {
+    try { unlinkSync(temp); } catch { /* nothing was written */ }
+    throw new CliError(EXIT.failed, 'update_failed', 'could not replace this CLI file: nothing was changed');
+  }
+  return { updated: version !== VERSION, from: VERSION, to: version, path, sha256 };
+}
+
 async function loadToken(values, env) {
-  const raw = values['token-stdin'] ? await readStdin() : env.BRIDGE_TOKEN;
+  const raw = values['token-stdin'] ? await readStdin() : env.BRIDGE_TOKEN || tokenFile(env);
   const token = raw?.replace(/\r?\n$/, '');
   if (!token) throw new CliError(EXIT.auth, 'token_missing', 'no token: set BRIDGE_TOKEN or use --token-stdin');
   if (!TOKEN.test(token)) throw new CliError(EXIT.auth, 'token_malformed', 'the token must be at least 16 visible characters, with no quotes, backslashes or spaces');
@@ -482,6 +541,7 @@ async function run(argv, env) {
     });
   }
 
+  if (cmd.local) return printJson(await selfUpdate(base, timeoutMs, values.sha256));
   const ctx = { base, timeoutMs, token: await loadToken(values, env) };
   if (cmd.list) return printJson(await runList(ctx, cmd, req, values));
   const result = await send(ctx, req);

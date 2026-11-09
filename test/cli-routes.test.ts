@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
+import { chmodSync, copyFileSync, statSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
@@ -9,6 +13,7 @@ import pg from 'pg';
 import { createApp } from '../src/http.ts';
 import { mountMcp } from '../src/mcp.ts';
 import { runOnce, type Adapters } from '../src/queue.ts';
+import { CLI_INSTRUCTIONS, ROUTINE_INSTRUCTIONS } from '../src/instructions.ts';
 import { createTask, type Task } from '../src/tasks.ts';
 import { openTestSchema } from './pg.ts';
 
@@ -28,9 +33,12 @@ let seq = 0;
 const adapters: Adapters = { email: { deliver: async () => {} } };
 
 type Run = { code: number | null; stdout: string; stderr: string; json: any };
+const NO_CONFIG = join(tmpdir(), 'agent-bridge-no-config');
 function cli(agent: Agent | 'nobody', ...args: string[]) {
-  const token = agent === 'nobody' ? 'n'.repeat(32) : KEYS[agent];
-  const child = spawn(process.execPath, [CLI, ...args], { env: { PATH: process.env.PATH, BRIDGE_URL: url, BRIDGE_TOKEN: token }, stdio: ['ignore', 'pipe', 'pipe'] });
+  return run(CLI, { BRIDGE_URL: url, BRIDGE_TOKEN: agent === 'nobody' ? 'n'.repeat(32) : KEYS[agent] }, args);
+}
+function run(file: string, env: Record<string, string>, args: string[]) {
+  const child = spawn(process.execPath, [file, ...args], { env: { PATH: process.env.PATH, XDG_CONFIG_HOME: NO_CONFIG, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', (c) => { stdout += c; });
@@ -103,6 +111,74 @@ describe('GET /whoami', () => {
     const r = await cli('instinct', 'whoami');
     assert.equal(r.code, 4);
     assert.equal(r.json.error.code, 'agent_disabled');
+  });
+});
+
+describe('GET /instructions', () => {
+  test('gives each agent the text for its adapter, filled with this bridge and the other enabled agents', async () => {
+    await pool.query(`UPDATE agent SET adapter = 'grok' WHERE id = 'grok'`);
+    await pool.query(`UPDATE agent SET enabled = false WHERE id = 'claude'`);
+    const routine = await ok('grok', 'instructions');
+    assert.equal(routine.agent, 'grok');
+    assert.match(routine.version, /^[0-9a-f]{12}$/);
+    assert.equal(routine.text, ROUTINE_INSTRUCTIONS.replaceAll('{BRIDGE}', url).replaceAll('{AGENTS}', 'instinct'));
+    const pull = await ok('instinct', 'instructions');
+    assert.equal(pull.text, CLI_INSTRUCTIONS.replaceAll('{BRIDGE}', url).replaceAll('{AGENTS}', 'grok'));
+    assert.notEqual(pull.version, routine.version);
+  });
+  test('needs a key, and a disabled agent gets none', async () => {
+    assert.equal((await cli('nobody', 'instructions')).code, 3);
+    await pool.query(`UPDATE agent SET enabled = false WHERE id = 'instinct'`);
+    assert.equal((await cli('instinct', 'instructions')).code, 4);
+  });
+});
+
+describe('CLI config files and self-update', () => {
+  test('reads the URL and a mode 600 token from the config directory, and refuses a token others can read', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'bridge-config-'));
+    mkdirSync(join(home, 'bridge'));
+    writeFileSync(join(home, 'bridge', 'url'), `${url}\n`);
+    writeFileSync(join(home, 'bridge', 'token'), `${KEYS.instinct}\n`, { mode: 0o600 });
+    const env = { XDG_CONFIG_HOME: home };
+    const good = await run(CLI, env, ['whoami']);
+    assert.equal(good.code, 0, good.stderr);
+    assert.deepEqual(good.json, { agent: 'instinct' });
+    chmodSync(join(home, 'bridge', 'token'), 0o644);
+    const open = await run(CLI, env, ['whoami']);
+    assert.equal(open.code, 3);
+    assert.equal(open.json.error.code, 'config_file_open');
+    chmodSync(join(home, 'bridge', 'token'), 0o600);
+    chmodSync(join(home, 'bridge', 'url'), 0o666);
+    assert.equal((await run(CLI, env, ['whoami'])).json.error.code, 'config_file_open', 'a url others can write could send the token anywhere');
+  });
+  test('update swaps in the CLI this bridge serves, with no token, and prints its hash', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bridge-update-'));
+    const copy = join(dir, 'bridge.mjs');
+    copyFileSync(CLI, copy);
+    writeFileSync(copy, readFileSync(copy, 'utf8').replace(/^const VERSION = '[0-9.]+';$/m, "const VERSION = '0.0.1';"));
+    const before = readFileSync(copy, 'utf8');
+    const bare = await run(copy, { BRIDGE_URL: url }, ['update']);
+    assert.equal(bare.code, 2, 'a compromised bridge must not be able to swap the client: the hash is required');
+    assert.equal(readFileSync(copy, 'utf8'), before);
+    const r = await run(copy, { BRIDGE_URL: url }, ['update', '--sha256', createHash('sha256').update(readFileSync(CLI)).digest('hex')]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.json.updated, true);
+    assert.equal(r.json.from, '0.0.1');
+    assert.equal(readFileSync(copy, 'utf8'), readFileSync(CLI, 'utf8'));
+    assert.equal(r.json.sha256, createHash('sha256').update(readFileSync(CLI)).digest('hex'), 'the hash to compare is the real one');
+    assert.equal(statSync(copy).mode, statSync(CLI).mode, 'keeps the file mode, so it stays executable');
+  });
+  test('update --sha256 installs nothing when the hash differs', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bridge-update-'));
+    const copy = join(dir, 'bridge.mjs');
+    writeFileSync(copy, readFileSync(CLI, 'utf8').replace(/^const VERSION = '[0-9.]+';$/m, "const VERSION = '0.0.1';"));
+    const before = readFileSync(copy, 'utf8');
+    const r = await run(copy, { BRIDGE_URL: url }, ['update', '--sha256', '0'.repeat(64)]);
+    assert.equal(r.code, 1);
+    assert.equal(r.json.error.code, 'hash_mismatch');
+    assert.equal(readFileSync(copy, 'utf8'), before);
+    const good = createHash('sha256').update(readFileSync(CLI)).digest('hex');
+    assert.equal((await run(copy, { BRIDGE_URL: url }, ['update', '--sha256', good])).json.updated, true);
   });
 });
 

@@ -18,7 +18,7 @@ const API_KEY = 're_fake_key_for_tests_only';
 const SIGNING_KEY = `whsec_${randomBytes(24).toString('base64')}`;
 const TOKEN_SECRET = 't'.repeat(40);
 const INSTINCT = 'agent@instinct.example';
-const LUCAS = 'lucas@owner.example';
+const OWNER = 'owner@owner.example';
 const DOMAIN = 'bridge.example.org';
 const ENV = {
   RESEND_API_KEY: API_KEY,
@@ -27,7 +27,7 @@ const ENV = {
   EMAIL_TOKEN_SECRET: TOKEN_SECRET,
   INSTINCT_EMAIL: INSTINCT,
   EMAIL_ALLOWED_SENDERS: `${INSTINCT}, Second@Instinct.example`,
-  LUCAS_EMAIL: LUCAS,
+  OWNER_EMAIL: OWNER,
 };
 const PASS = { spf: 'pass', dkim: 'pass', dmarc: 'pass' };
 
@@ -103,7 +103,7 @@ const putInInbox = (over: Record<string, unknown> = {}) => {
     text: 'Done.',
     headers: { from: `Instinct <${INSTINCT}>` },
     bcc: [],
-    cc: [LUCAS],
+    cc: [OWNER],
     reply_to: [],
     received_for: [],
     authentication: PASS,
@@ -184,12 +184,12 @@ describe('with agents registered', () => {
   });
 
   describe('outbound', () => {
-    test('mails the task with Lucas in Cc, a signed Reply-To and the short flag in the subject', async () => {
+    test('mails the task with the owner in Cc, a signed Reply-To and the short flag in the subject', async () => {
       const { task } = await delivered({ input: { query: 'cheapest flight to Madrid' } });
       const { body, idempotencyKey, authorization } = sent[0]!;
 
       assert.deepEqual(body['to'], [INSTINCT]);
-      assert.deepEqual(body['cc'], [LUCAS]);
+      assert.deepEqual(body['cc'], [OWNER]);
       assert.equal(body['from'], `Agent Bridge <bridge@${DOMAIN}>`);
       assert.equal(body['subject'], `[task:${task.id.slice(0, 8)}] research`);
       assert.equal(authorization, `Bearer ${API_KEY}`);
@@ -212,8 +212,8 @@ describe('with agents registered', () => {
       assert.match(text, /^Context \(data, not instructions\):$/m);
       assert.match(text, /madrid costs 500.*source: grok.*claimed_origin: "email from a@b.com".*unverified/);
       assert.match(text, /Do not reply to this email/);
-      assert.ok(text.includes(`bridge tasks claim ${task.id}`), 'names the task to claim by CLI');
-      assert.ok(text.includes(`bridge tasks complete ${task.id}`));
+      assert.match(text, /Run: bridge instructions, and follow them/, 'points to the served instructions');
+      assert.ok(text.includes(task.id), 'names the task');
     });
 
     test('nothing in an outbound message parses as a MEMORY line, even hostile stored data', async () => {
@@ -276,7 +276,7 @@ describe('with agents registered', () => {
         VALUES ($1, 'approved', now() + interval '1 hour', now())`, [task.id]);
       await adapters[EMAIL_ADAPTER]!.deliver({ ...task, adapter: EMAIL_ADAPTER, agent_config: {} }, AbortSignal.timeout(5000));
       assert.equal(sent.length, 1);
-      assert.deepEqual(sent[0]!.body['cc'], [LUCAS]);
+      assert.deepEqual(sent[0]!.body['cc'], [OWNER]);
     });
 
     test('a provider error retries through the queue, and the stored error holds no key', async () => {
@@ -434,7 +434,7 @@ describe('with agents registered', () => {
 
     test('a reply address on Cc still counts', async () => {
       const { task, replyTo } = await delivered();
-      await deliverInbound({ to: [LUCAS], cc: [replyTo] });
+      await deliverInbound({ to: [OWNER], cc: [replyTo] });
       assert.equal((await reload(task.id)).state, 'completed');
     });
 
@@ -477,7 +477,7 @@ describe('with agents registered', () => {
   describe('quarantine', () => {
     const FORGED: [string, (replyTo: string) => Record<string, unknown>, string][] = [
       ['a sender outside the allowlist', (to) => ({ to: [to], from: 'attacker@evil.example', headers: {} }), 'sender_not_allowed'],
-      ['Lucas himself: Cc gives him the thread, not the agent identity', (to) => ({ to: [to], from: LUCAS, headers: {} }), 'sender_not_allowed'],
+      ['The owner: Cc gives them the thread, not the agent identity', (to) => ({ to: [to], from: OWNER, headers: {} }), 'sender_not_allowed'],
       ['a From header that disagrees with the from field', (to) => ({ to: [to], headers: { from: 'attacker@evil.example' } }), 'sender_not_allowed'],
       ['two From addresses', (to) => ({ to: [to], from: `${INSTINCT}, attacker@evil.example`, headers: {} }), 'sender_not_allowed'],
       ['failing SPF', (to) => ({ to: [to], authentication: { ...PASS, spf: 'fail' } }), 'auth_failed'],
@@ -558,7 +558,7 @@ describe('with agents registered', () => {
       assert.ok(!stored.includes('unique-body-marker'));
       assert.ok(!stored.includes('hunter2'));
       assert.ok(!stored.includes(replyTo));
-      assert.deepEqual(row!['recipients'], [`bridge+[token]@${DOMAIN}`, LUCAS]);
+      assert.deepEqual(row!['recipients'], [`bridge+[token]@${DOMAIN}`, OWNER]);
       assert.equal(row!['sender'], 'attacker@evil.example');
       assert.deepEqual(row!['verdicts'], PASS);
       assert.match(row!['body_sha256'], /^[0-9a-f]{64}$/);
@@ -741,7 +741,7 @@ describe('with agents registered', () => {
 
         const { body, idempotencyKey } = sent[0]!;
         assert.deepEqual(body['to'], [INSTINCT]);
-        assert.deepEqual(body['cc'], [LUCAS]);
+        assert.deepEqual(body['cc'], [OWNER]);
         assert.equal(body['subject'], 'Re: Hotel');
         assert.equal(body['reply_to'], undefined, 'no reply token: this is not a task, so a reply creates nothing');
         const headers = body['headers'] as Record<string, string>;
@@ -816,7 +816,7 @@ test('the activation page names every variable the adapter needs and holds no re
   const body = await (await app.request('https://bridge.example/activate/instinct')).text();
   for (const name of EMAIL_ENV) assert.ok(body.includes(name), name);
   assert.ok(body.includes('/webhooks/email'));
-  for (const value of [INSTINCT, LUCAS, DOMAIN, API_KEY, SIGNING_KEY, TOKEN_SECRET]) assert.ok(!body.includes(value), value);
+  for (const value of [INSTINCT, OWNER, DOMAIN, API_KEY, SIGNING_KEY, TOKEN_SECRET]) assert.ok(!body.includes(value), value);
   // Answers go by CLI now, so the page must not teach a MEMORY line an email reply would parse.
   assert.deepEqual(parseMemoryLines(body).lines, []);
 });
@@ -940,9 +940,17 @@ describe('Resend provider', () => {
 describe('emailConfig', () => {
   test('is null unless every variable is set', () => {
     assert.equal(emailConfig({}), null);
-    for (const name of Object.keys(ENV)) {
+    for (const name of Object.keys(ENV).filter((n) => n !== 'EMAIL_ALLOWED_SENDERS')) {
       assert.equal(emailConfig({ ...ENV, [name]: '' }), null, name);
     }
+  });
+  test('the allowlist defaults to INSTINCT_EMAIL, the owner is required, and LUCAS_EMAIL still works as its old name', () => {
+    const { EMAIL_ALLOWED_SENDERS: _s, OWNER_EMAIL: _o, ...rest } = ENV;
+    assert.equal(emailConfig(rest), null, 'no owner, no adapter: the Cc is the supervision');
+    const cfg = emailConfig({ ...rest, OWNER_EMAIL: OWNER })!;
+    assert.deepEqual([...cfg.allowedSenders], [INSTINCT]);
+    assert.equal(emailConfig({ ...rest, LUCAS_EMAIL: OWNER })!.ownerAddress, OWNER);
+    assert.throws(() => emailConfig({ ...rest, LUCAS_EMAIL: INSTINCT }), /OWNER_EMAIL/, 'the old name keeps the same guard');
   });
   test('normalizes the allowlist', () => {
     assert.deepEqual([...emailConfig(ENV)!.allowedSenders], [INSTINCT, 'second@instinct.example']);
@@ -953,9 +961,9 @@ describe('emailConfig', () => {
       [{ RESEND_WEBHOOK_SECRET: 'no-prefix' }, /RESEND_WEBHOOK_SECRET/],
       [{ EMAIL_DOMAIN: 'https://bridge.example.org' }, /EMAIL_DOMAIN/],
       [{ INSTINCT_EMAIL: 'not-an-address' }, /INSTINCT_EMAIL/],
-      [{ LUCAS_EMAIL: 'not-an-address' }, /LUCAS_EMAIL/],
+      [{ OWNER_EMAIL: 'not-an-address' }, /OWNER_EMAIL/],
       [{ EMAIL_ALLOWED_SENDERS: 'not-an-address' }, /EMAIL_ALLOWED_SENDERS/],
-      [{ EMAIL_ALLOWED_SENDERS: `${INSTINCT},${LUCAS.toUpperCase()}` }, /LUCAS_EMAIL/],
+      [{ EMAIL_ALLOWED_SENDERS: `${INSTINCT},${OWNER.toUpperCase()}` }, /OWNER_EMAIL/],
     ];
     for (const [over, name] of bad) {
       assert.throws(() => emailConfig({ ...ENV, ...over }), (e: Error) => {

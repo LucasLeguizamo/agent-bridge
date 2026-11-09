@@ -6,6 +6,8 @@ import { containsSecret, containsSecretDeep } from './secrets.ts';
 
 export const MAX_HOPS = 4; // hop is 0-based, so a chain gets hops 0..3: four deliveries.
 export const DAILY_PAIR_CAP = 20;
+// Tasks one task may spawn. The instructions say the same; this makes it more than a prompt.
+export const MAX_CHILDREN = 2;
 const PAUSE = '1 hour';
 const MAX_REJECTED_PER_HOUR = 100;
 const MAX_REFUSALS_PER_HOUR = 100;
@@ -49,7 +51,7 @@ const TEXT = z.string().min(1).max(10_000);
 const INTENT_POLICY = new Map<string, { risk: Task['risk']; input: z.ZodType }>([
   // Extra text fields are allowed (open bridge between agents): they say nothing a free-text query cannot. Only the
   // type is checked: {action:"send_payment"} as text stays read. What stops an action is the receiver (data is never
-  // an instruction; Instinct asks Lucas first), not this schema. Objects, lists and numbers make the task side_effect.
+  // an instruction; side_effect waits for the owner), not this schema. Objects, lists and numbers make the task side_effect.
   ['research', { risk: 'read', input: z.object({ query: TEXT }).catchall(TEXT) }],
   ['summarize', { risk: 'read', input: z.object({ text: TEXT }).catchall(TEXT) }],
   ['memory.write', { risk: 'write', input: z.strictObject({ key: TEXT, value: TEXT }) }],
@@ -170,7 +172,17 @@ export async function createTask(pool: Pool, from: string, t: NewTask) {
     const root = parent?.root_id;
     const hop = parent ? parent.hop + 1 : 0;
 
-    const reason = await guardVerdict(c, from, t, hop);
+    const parentId = explicit?.id ?? parent?.id ?? null;
+    // Counted under both the named and the implicit parent, so naming an old task does not open a fresh fan-out budget.
+    const parentIds = [...new Set([explicit?.id, implicit?.id].filter((id): id is string => !!id))];
+    const { rows: [kids] } = parentIds.length
+      ? await c.query<{ n: number }>(
+        `SELECT coalesce(max(n), 0)::int AS n FROM (
+           SELECT count(*) AS n FROM task WHERE parent_id = ANY($1::uuid[]) AND state <> 'rejected' GROUP BY parent_id) k`,
+        [parentIds])
+      : { rows: [{ n: 0 }] };
+    // ponytail: no lock across siblings, so two racing creates can both pass; add one if fan-out abuse shows up.
+    const reason = await guardVerdict(c, from, t, hop) ?? (kids!.n >= MAX_CHILDREN ? 'fanout_limit' : null);
     if (reason) {
       // Rejections are stored for audit, so a misbehaving sender must not be able to grow the table without limit.
       const { rows: [r] } = await c.query<{ n: number }>(
@@ -188,7 +200,7 @@ export async function createTask(pool: Pool, from: string, t: NewTask) {
        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12, now() + interval '24 hours')
        ON CONFLICT (idempotency_key) DO NOTHING
        RETURNING *`,
-      [id, root ?? id, explicit?.id ?? parent?.id ?? null, from, t.to_agent, t.intent, JSON.stringify(t.input),
+      [id, root ?? id, parentId, from, t.to_agent, t.intent, JSON.stringify(t.input),
         reason ? JSON.stringify({ rejected: reason }) : null, risk, state, hop, key],
     );
     if (!task) return (await replay())!; // Lost a race with the same key on another pair.

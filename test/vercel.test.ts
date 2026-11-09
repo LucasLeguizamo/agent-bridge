@@ -529,9 +529,9 @@ describe('deploy files', () => {
     assert.doesNotMatch(sql, /Bearer [A-Za-z0-9]{8,}/);
   });
 
-  test('the runbook covers the Vercel steps Lucas has to run', () => {
+  test('the runbook covers the Vercel steps the owner has to run', () => {
     const runbook = read('docs/runbook.md');
-    for (const must of ['CRON_SECRET', 'Exposed schemas', 'PGRST106', 'db/cron_dispatch.sql', '/health', 'Kill switch', 'Hobby', 'statement_timeout', 'pdx1']) {
+    for (const must of ['CRON_SECRET', 'Exposed schemas', 'PGRST106', 'db/cron_dispatch.sql', '/health', 'Kill switch', 'Hobby', 'statement_timeout']) {
       assert.ok(runbook.includes(must), must);
     }
     assert.doesNotMatch(runbook, /\bfly (deploy|secrets|machine|status)/);

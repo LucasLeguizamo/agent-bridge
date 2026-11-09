@@ -43,7 +43,7 @@ const listen = async (s: ReturnType<typeof fakeServer>) => {
 type Run = { code: number | null; stdout: string; stderr: string; json: any };
 /** Async on purpose: the fake server lives in this process, so a sync spawn would deadlock it. */
 function cli(args: string[], { env = {}, stdin }: { env?: Record<string, string | undefined>; stdin?: string } = {}) {
-  const fullEnv = { PATH: process.env.PATH, BRIDGE_URL: bridge.url, BRIDGE_TOKEN: TOKEN, ...env };
+  const fullEnv = { PATH: process.env.PATH, XDG_CONFIG_HOME: '/nonexistent/agent-bridge', BRIDGE_URL: bridge.url, BRIDGE_TOKEN: TOKEN, ...env };
   const child = spawn(NODE, [CLI, ...args], { env: fullEnv as NodeJS.ProcessEnv, stdio: ['pipe', 'pipe', 'pipe'] });
   if (stdin !== undefined) child.stdin.write(stdin);
   child.stdin.end();
@@ -524,7 +524,7 @@ describe('what comes back is data', () => {
 });
 
 describe('help and version', () => {
-  const commands = [['whoami'], ['tasks', 'pending'], ['tasks', 'get'], ['tasks', 'claim'], ['tasks', 'complete'], ['tasks', 'create'], ['memory', 'search'], ['memory', 'write']];
+  const commands = [['instructions'], ['update'], ['whoami'], ['tasks', 'pending'], ['tasks', 'get'], ['tasks', 'claim'], ['tasks', 'complete'], ['tasks', 'create'], ['memory', 'search'], ['memory', 'write']];
 
   for (const c of commands) {
     test(`${c.join(' ')} --help has an example, needs nothing set, and leaves stdout to JSON`, async () => {

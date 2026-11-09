@@ -1,4 +1,5 @@
 // Regression tests for the pre-deploy audit findings. Each describe names its finding, and each test fails without its fix.
+import { ROUTINE_INSTRUCTIONS } from '../src/instructions.ts';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
@@ -578,16 +579,16 @@ describe('L6 and L4: routine and rotation docs', () => {
   const read = (p: string) => readFileSync(new URL(`../docs/${p}`, import.meta.url), 'utf8');
 
   test('the routine passes task_id and origin when a memory.write task saves a fact', () => {
-    const line = read('grok-routine.md').split('\n').find((l) => l.includes('memory.write:'))!;
-    assert.match(line, /task_id/);
-    assert.match(line, /origin/);
+    const step = ROUTINE_INSTRUCTIONS.slice(ROUTINE_INSTRUCTIONS.indexOf('memory.write:'), ROUTINE_INSTRUCTIONS.indexOf('Any other intent'));
+    assert.match(step, /"task_id"/);
+    assert.match(step, /"origin"/);
   });
 
   test('the runbook documents rotating the webhook key', () => {
     const runbook = read('runbook.md');
-    const section = runbook.slice(runbook.indexOf('## Rotar claves'));
+    const section = runbook.slice(runbook.indexOf('## Rotating keys'));
     assert.match(section, /GROK_WEBHOOK_KEY/);
-    assert.match(read('grok-routine.md'), /[Rr]ota.*GROK_WEBHOOK_KEY/);
+    assert.match(read('agents.md'), /[Rr]otate.*GROK_WEBHOOK_KEY/);
   });
 });
 
