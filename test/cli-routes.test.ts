@@ -156,7 +156,11 @@ describe('CLI config files and self-update', () => {
     const copy = join(dir, 'bridge.mjs');
     copyFileSync(CLI, copy);
     writeFileSync(copy, readFileSync(copy, 'utf8').replace(/^const VERSION = '[0-9.]+';$/m, "const VERSION = '0.0.1';"));
-    const r = await run(copy, { BRIDGE_URL: url }, ['update']);
+    const before = readFileSync(copy, 'utf8');
+    const bare = await run(copy, { BRIDGE_URL: url }, ['update']);
+    assert.equal(bare.code, 2, 'a compromised bridge must not be able to swap the client: the hash is required');
+    assert.equal(readFileSync(copy, 'utf8'), before);
+    const r = await run(copy, { BRIDGE_URL: url }, ['update', '--sha256', createHash('sha256').update(readFileSync(CLI)).digest('hex')]);
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.json.updated, true);
     assert.equal(r.json.from, '0.0.1');

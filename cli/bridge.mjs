@@ -97,7 +97,7 @@ const COMMANDS = [
     request: () => ({ method: 'GET', path: '/instructions' }),
   },
   {
-    name: 'update', summary: 'Replace this CLI with the version the bridge serves, and print its sha256. Needs no token.',
+    name: 'update', summary: 'Replace this CLI with the version the bridge serves, only if its sha256 matches. Needs no token.',
     args: [], flags: ['sha256'], local: true,
     example: 'bridge update',
     request: () => ({ method: 'GET', path: '/cli/bridge.mjs' }),
@@ -370,9 +370,10 @@ async function readStdin() {
 const tokenFile = (env) => readConfig(env, 'token', 0o077); // As ssh does with a private key.
 
 // Downloads the CLI the bridge serves and swaps it in atomically. It runs only what the same bridge already serves
-// at install time; compare the printed sha256 with one you trust.
+// at install time, and only when its sha256 matches the one the owner gave.
 async function selfUpdate(base, timeoutMs, expected) {
-  if (expected !== undefined && !/^[0-9a-f]{64}$/i.test(expected)) throw usage('--sha256 must be 64 hex characters');
+  // Required: without it a compromised bridge could swap in its own client, which holds the token.
+  if (!/^[0-9a-f]{64}$/i.test(expected ?? '')) throw usage('--sha256 <64 hex characters> is required, from a release you trust');
   const res = await fetch(urlFor(base, '/cli/bridge.mjs'), { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) })
     .catch(() => { throw new CliError(EXIT.retryable, 'network_error', 'could not reach the bridge', true); });
   if (!res.ok) throw errorFor(res.status, undefined);
@@ -380,7 +381,7 @@ async function selfUpdate(base, timeoutMs, expected) {
   const version = /^const VERSION = '([0-9.]+)';$/m.exec(source)?.[1];
   if (!source.startsWith('#!/usr/bin/env node\n') || !version) throw badResponse();
   const sha256 = createHash('sha256').update(source).digest('hex');
-  if (expected !== undefined && sha256 !== expected.toLowerCase()) {
+  if (sha256 !== expected.toLowerCase()) {
     throw new CliError(EXIT.failed, 'hash_mismatch', 'the downloaded CLI does not have the expected sha256: nothing was changed');
   }
   const path = fileURLToPath(import.meta.url);

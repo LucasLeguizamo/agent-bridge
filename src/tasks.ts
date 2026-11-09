@@ -173,8 +173,13 @@ export async function createTask(pool: Pool, from: string, t: NewTask) {
     const hop = parent ? parent.hop + 1 : 0;
 
     const parentId = explicit?.id ?? parent?.id ?? null;
-    const { rows: [kids] } = parentId
-      ? await c.query<{ n: number }>(`SELECT count(*)::int AS n FROM task WHERE parent_id = $1 AND state <> 'rejected'`, [parentId])
+    // Counted under both the named and the implicit parent, so naming an old task does not open a fresh fan-out budget.
+    const parentIds = [...new Set([explicit?.id, implicit?.id].filter((id): id is string => !!id))];
+    const { rows: [kids] } = parentIds.length
+      ? await c.query<{ n: number }>(
+        `SELECT coalesce(max(n), 0)::int AS n FROM (
+           SELECT count(*) AS n FROM task WHERE parent_id = ANY($1::uuid[]) AND state <> 'rejected' GROUP BY parent_id) k`,
+        [parentIds])
       : { rows: [{ n: 0 }] };
     // ponytail: no lock across siblings, so two racing creates can both pass; add one if fan-out abuse shows up.
     const reason = await guardVerdict(c, from, t, hop) ?? (kids!.n >= MAX_CHILDREN ? 'fanout_limit' : null);

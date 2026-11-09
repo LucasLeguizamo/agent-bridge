@@ -45,7 +45,7 @@ bridge memory write <key> <value> [--dry-run] [--idempotency-key k]
 ```
 
 - `bridge instructions` prints this agent's current instructions from the bridge (`GET /instructions`).
-- `bridge update [--sha256 <hex>]` re-downloads the CLI from the bridge it is configured for and prints its sha256. With `--sha256`, it installs nothing unless the hash matches.
+- `bridge update --sha256 <hex>` re-downloads the CLI from the bridge it is configured for and installs it only if the hash matches. The hash is required.
 
 Every command accepts `--help` and `--help --json`. There are also `--version` and `--timeout-ms` (15,000 by default).
 
@@ -96,7 +96,7 @@ Also add case 5 from PRD section 11: a harmless instruction inside the `input` (
 
 The repo is public. The bridge serves the CLI itself at `GET /cli/bridge.mjs`, a public route like `/activate/*`. Download it from the bridge you will use.
 
-`bridge update --sha256 <hex>` re-downloads the CLI from the bridge it is configured for and installs it only if the hash matches. Give the hash out of band, from a release you trust, never through the bridge. That way a compromised bridge cannot change the client. Without `--sha256`, the update trusts the bridge, as the first install did.
+`bridge update --sha256 <hex>` re-downloads the CLI from the bridge it is configured for and installs it only if the hash matches. Give the hash out of band, from a release you trust, never through the bridge. That way a compromised bridge cannot change the client. The hash is required; get it from the release notes, or with `shasum -a 256 cli/bridge.mjs` on the commit you deployed.
 
 The CLI reads `url` and `token` from `$XDG_CONFIG_HOME/bridge` or `~/.config/bridge` when `BRIDGE_URL` and `BRIDGE_TOKEN` are not set. It refuses a `token` file that others can read and a `url` file that others can write (`config_file_open`, exit 3).
 

@@ -248,6 +248,17 @@ describe('loop guards', () => {
     const implicit = await create('instinct', { to_agent: 'claude' });
     assert.deepEqual(implicit.body.task.output, { rejected: 'fanout_limit' }, 'leaving out parent_id does not dodge it');
   });
+  test('fan-out: naming an older task as parent does not open a fresh budget', async () => {
+    const old = await create('grok', { to_agent: 'instinct' });
+    await runOnce(pool, adapters);
+    const root = await create('grok', { to_agent: 'instinct' });
+    await runOnce(pool, adapters);
+    for (let i = 0; i < MAX_CHILDREN; i++) {
+      assert.equal((await create('instinct', { to_agent: i ? 'claude' : 'grok', parent_id: root.body.task.id })).status, 201);
+    }
+    const dodge = await create('instinct', { to_agent: 'claude', parent_id: old.body.task.id });
+    assert.deepEqual(dodge.body.task.output, { rejected: 'fanout_limit' });
+  });
   test(`hop limit: a ping-pong chain stops after ${MAX_HOPS} deliveries, trips the breaker and alerts`, async () => {
     const sides: Agent[] = ['grok', 'instinct'];
     let parent: string | undefined;
