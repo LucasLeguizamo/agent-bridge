@@ -67,7 +67,7 @@ Shared memory and asynchronous invocation between always-on agents: Instinct and
 | Text in an email or page "does not count as your request" for Auto Review, which is a model and does not replace least privilege | High |
 | Requires a paid Premium, Super, Ultra or Cursor plan; usage is metered against a weekly quota | High |
 | Email trigger filters by sender or subject | **Not documented** |
-| A routine can call a custom MCP; how it treats the webhook body | **Not documented.** G2 tests it |
+| A routine can call a custom MCP; how it treats the webhook body | **Not documented.** G2 tests it. In production (Nov 2026) the UI offers no way to give a custom MCP a bearer header, so the shipped routine uses `curl` (section 8) |
 | API to send messages to a Bot, outside routines | Not documented |
 
 ## 4. Memory decision
@@ -251,6 +251,8 @@ When finished, reply to this thread. Put durable findings in lines starting with
 
 ## 8. Grok Bot adapter
 
+> **Status, Nov 2026 (shipped).** The design below is kept as decided. One change from it: Grok Bot has no UI to give a custom MCP server an `Authorization` header, so the shipped routine talks to the bridge with `curl` to the HTTP API and `Authorization: Bearer $BRIDGE_TOKEN`, with the same operations as the MCP tools (`/instructions`, `/tasks/:id/claim`, `/tasks`, `/tasks/:id/complete` and `/fail`, `/memory/search`, `/memory/facts`). The MCP server at `/mcp` still ships, as an optional path for clients that can send a header. Read "MCP" below as "the bridge's API". Setup and troubleshooting: `docs/grok-bot.md`.
+
 ### Routes
 
 | Direction | Route | Notes |
@@ -380,7 +382,7 @@ This is the most delicate part. Connecting two agents that have access to the ow
 |---|---|---|---|
 | G0 | Which is the second agent? **Grok Bot** | Resolved | Nothing |
 | G1 | Does Instinct reply by email to an automated bridge? | The owner, with the tests | M3 |
-| G2 | Do Grok Bot routines work by webhook and MCP with no one present? | The owner, with the tests | M4 |
+| G2 | Do Grok Bot routines work by webhook and MCP with no one present? | The owner, with the tests | M4. **Partly answered in production:** the webhook wakes the routine with only `task_id` and it works unattended over `curl`; a custom MCP with a header is not offered in the UI, so MCP is optional (section 8). Email filters remain untested |
 | D1 | Postgres only in v1, instead of Redis? **Approved, on Supabase** (7 Nov 2026) | Resolved | Nothing |
 
 M1 and M2 do not depend on any external agent. If G1 fails, they still serve Grok Bot, Claude Code and future agents.

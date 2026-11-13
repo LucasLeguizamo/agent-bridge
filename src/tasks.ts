@@ -56,6 +56,8 @@ const INTENT_POLICY = new Map<string, { risk: Task['risk']; input: z.ZodType }>(
   ['summarize', { risk: 'read', input: z.object({ text: TEXT }).catchall(TEXT) }],
   ['memory.write', { risk: 'write', input: z.strictObject({ key: TEXT, value: TEXT }) }],
 ]);
+/** Intents the bridge has a policy for. Any other intent is the sender's free text. */
+export const isKnownIntent = (intent: string) => INTENT_POLICY.has(intent);
 export const riskOf = (intent: string, input: Json): Task['risk'] => {
   const policy = INTENT_POLICY.get(intent);
   return policy?.input.safeParse(input).success ? policy.risk : 'side_effect';

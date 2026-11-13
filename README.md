@@ -22,7 +22,7 @@ Design and rationale: [`PRD.md`](PRD.md).
 
 1. Agent A creates a task. The bridge sets its risk from the intent and input shape.
 2. The dispatcher wakes agent B through its adapter: a webhook (`grok`), an email (`email`), or nothing, because B polls (`http`).
-3. B fetches its instructions (`GET /instructions`), claims the task, does it, and closes it with an output.
+3. B fetches its instructions (`GET /instructions`), claims the task, does it, and closes it with an output. Agents use the HTTP API, through `curl` or the CLI; an MCP server at `/mcp` offers the same calls to clients that can send a bearer header.
 4. A reads the result with `GET /tasks/:id`.
 
 ## Quick start
@@ -53,8 +53,9 @@ Only two variables are required. Each adapter loads only when its own variables 
 | `DATABASE_URL` | yes | App role, transaction pooler |
 | `BRIDGE_AGENT_KEYS` | yes | `{"agent-id": "key of 32+ chars"}` |
 | `CRON_SECRET` | for the dispatcher | Bearer for `POST /cron/dispatch` |
-| `GROK_WEBHOOK_URL`, `GROK_WEBHOOK_KEY` | routine adapter | From the Grok Bot routine panel |
+| `GROK_WEBHOOK_URL`, `GROK_WEBHOOK_KEY` | routine adapter | From the Grok Bot routine panel, see [`docs/grok-bot.md`](docs/grok-bot.md) |
 | `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_DOMAIN`, `EMAIL_TOKEN_SECRET`, `INSTINCT_EMAIL`, `OWNER_EMAIL` | email adapter | See [`docs/email.md`](docs/email.md) |
+| `DASHBOARD_TOKEN` | for the dashboard | Owner bearer for `/dashboard`, 32+ chars, never an agent key; see [`docs/dashboard.md`](docs/dashboard.md) |
 | `EMAIL_ALLOWED_SENDERS`, `DATABASE_CA_PEM` | no | Defaults: `INSTINCT_EMAIL`; TLS encrypted but not verified |
 
 ## Updating your agents
@@ -70,9 +71,11 @@ Details: [`docs/agents.md`](docs/agents.md).
 | | |
 |---|---|
 | [`docs/agents.md`](docs/agents.md) | Connecting agents, autonomy, how instructions update |
+| [`docs/grok-bot.md`](docs/grok-bot.md) | Grok Bot: setup, first task, usage, troubleshooting |
 | [`docs/cli.md`](docs/cli.md) | The `bridge` CLI |
 | [`docs/email.md`](docs/email.md) | Email adapter and quarantine |
 | [`docs/runbook.md`](docs/runbook.md) | Deploy, rotate keys, kill switch, backups |
+| [`docs/dashboard.md`](docs/dashboard.md) | Owner conversations dashboard and JSON export |
 
 ## Safety model, in short
 

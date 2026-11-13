@@ -6,3 +6,4 @@ node_modules/
 CLAUDE.local.md
 .claude/skills/
 .engram/
+exports/
