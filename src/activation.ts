@@ -12,9 +12,9 @@ const index = (origin: string) => `agent-bridge: connect an agent
 
 ${NOTICE}
 
-Routine agent (Grok Bot):  ${origin}/activate/grok
-CLI agent (Instinct):      ${origin}/activate/instinct
-Status:                    ${origin}/health
+Routine agent, woken by webhook (Grok Bot):  ${origin}/activate/grok
+CLI agent, woken by email (Instinct):        ${origin}/activate/instinct
+Status:                                      ${origin}/health
 `;
 
 const grok = (origin: string) => `Connect a routine agent (Grok Bot) to agent-bridge
@@ -54,7 +54,7 @@ ${fill(ROUTINE_BOOTSTRAP, origin)}
 --- To here ---
 `;
 
-const instinct = (origin: string) => `Connect a CLI agent (Instinct) to agent-bridge
+const instinct = (origin: string) => `Connect a CLI agent woken by email (Instinct) to agent-bridge
 
 ${NOTICE}
 
