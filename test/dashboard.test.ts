@@ -183,7 +183,7 @@ describe('GET /dashboard/conversations', () => {
   });
 
   test('redact=1 drops free text and keeps machine codes', async () => {
-    await task({ at: 3, state: 'rejected', intent: 'Ask Lucas about his flight', input: { text: 'private plans in Madrid' },
+    await task({ at: 3, state: 'rejected', intent: 'Ask Priya about her flight', input: { text: 'private plans in Madrid' },
       output: { rejected: 'pair_paused', note: 'free text here' } });
     await task({ at: 2, state: 'failed', input: { text: 'more private text' }, output: { error: 'deadline_exceeded' } });
     await task({ at: 1, state: 'failed', output: { error: 'Receiver said: call me at home' },
@@ -200,11 +200,11 @@ describe('GET /dashboard/conversations', () => {
     assert.deepEqual(tasks.map((t) => t.intent), ['research', 'research', 'other']);
     assert.deepEqual(tasks[0]!.events.map((e) => e.type), ['task_created', 'redacted']);
     const text = JSON.stringify(body);
-    for (const leaked of ['private', 'free text', 'Receiver', 'Lucas', 'Note-To-Self']) assert.ok(!text.includes(leaked), leaked);
+    for (const leaked of ['private', 'free text', 'Receiver', 'Priya', 'Note-To-Self']) assert.ok(!text.includes(leaked), leaked);
   });
 
   test('redact=1 keeps only intents with a policy and output codes the bridge writes, snake_case or not', async () => {
-    await task({ at: 3, state: 'failed', intent: 'ask_owner_about_madrid_flight', output: { error: 'call_me_at_home_after_9' } });
+    await task({ at: 3, state: 'failed', intent: 'ask_priya_about_madrid_flight', output: { error: 'call_me_at_home_after_9' } });
     await task({ at: 2, state: 'rejected', intent: 'memory.write', output: { rejected: 'not_a_bridge_code', error: 'hop_limit' } });
     await task({ at: 1, state: 'rejected', intent: 'summarize', output: { rejected: 'fanout_limit' } });
 

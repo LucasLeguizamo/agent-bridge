@@ -16,7 +16,7 @@ Names only. Values never go in the repo or in chat.
 | Where | Variables |
 |---|---|
 | Vercel, **Production** only | `DATABASE_URL`, `BRIDGE_AGENT_KEYS`, `CRON_SECRET` |
-| Vercel, **Production** only, optional | `DATABASE_CA_PEM`, `GROK_WEBHOOK_URL`, `GROK_WEBHOOK_KEY`, `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_DOMAIN`, `EMAIL_TOKEN_SECRET`, `INSTINCT_EMAIL`, `OWNER_EMAIL`, `EMAIL_ALLOWED_SENDERS` |
+| Vercel, **Production** only, optional | `DATABASE_CA_PEM`, `GROK_WEBHOOK_URL`, `GROK_WEBHOOK_KEY`, `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_DOMAIN`, `EMAIL_TOKEN_SECRET`, `INSTINCT_EMAIL`, `OWNER_EMAIL`, `EMAIL_ALLOWED_SENDERS`, `DASHBOARD_TOKEN` |
 | Supabase Vault | `bridge_url`, `bridge_cron_secret` |
 | `.env.local` only, never in Vercel | `ADMIN_DATABASE_URL`, `BRIDGE_DB_PASSWORD`, `TEST_DATABASE_URL` |
 
@@ -253,6 +253,7 @@ Every rotation needs the owner's approval. In Vercel, a variable change takes ef
   ```
 
 - **`CRON_SECRET`:** change the variable and deploy, and update `bridge_cron_secret` with `vault.update_secret`. Between the two steps, the cron gets 401 and tasks wait: nothing is lost.
+- **`DASHBOARD_TOKEN`:** generate with `openssl rand -hex 32`, update the variable and deploy, then paste the new token in the dashboard. The old one stops working on deploy.
 - **`bridge_app` role:** in `psql` with the admin URL, `\password bridge_app`. Then update `DATABASE_URL` in Vercel and in `.env.local`, and deploy.
 - **`postgres` role:** change it in the Supabase dashboard and update `.env.local`. Vercel does not use it.
 

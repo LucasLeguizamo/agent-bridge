@@ -54,7 +54,7 @@ function redactOutput(output: Json): Json {
 /**
  * Keeps only what the bridge wrote: intents it has a policy for, its own output codes and event types (agents can
  * only write agent.*). Ids become c1, t1... in order of appearance, the same within one call, parent links kept.
- * Timestamps, agent ids, hops and states stay.
+ * Timestamps, agent ids, hops and states stay; payload sizes do not.
  */
 export function redactConversations(conversations: Conversation[]): Conversation[] {
   const ids = { c: new Map<string, string>(), t: new Map<string, string>() };
@@ -70,6 +70,7 @@ export function redactConversations(conversations: Conversation[]): Conversation
       intent: t.intent && (isKnownIntent(t.intent) ? t.intent : 'other'),
       input: null,
       output: redactOutput(t.output),
+      input_bytes: 0, output_bytes: null, truncated: false, // sizes leak payload length
       events: t.events.map((e) => ({ ...e, type: e.type.startsWith('agent.') ? 'redacted' : e.type })),
     })),
   }));
