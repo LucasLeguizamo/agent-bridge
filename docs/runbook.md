@@ -20,7 +20,7 @@ Names only. Values never go in the repo or in chat.
 | Supabase Vault | `bridge_url`, `bridge_cron_secret` |
 | `.env.local` only, never in Vercel | `ADMIN_DATABASE_URL`, `BRIDGE_DB_PASSWORD`, `TEST_DATABASE_URL` |
 
-`LUCAS_EMAIL` is still read as a fallback for `OWNER_EMAIL`.
+`LUCAS_EMAIL` is still read as a fallback for `OWNER_EMAIL`, with a warning, until 0.3.0.
 
 Production only, on purpose: a preview without variables answers 500 instead of talking to the real database. Without both Grok variables, or without the six required email variables (`RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_DOMAIN`, `EMAIL_TOKEN_SECRET`, `INSTINCT_EMAIL`, `OWNER_EMAIL`), that adapter does not load and its tasks stay queued without spending attempts. `EMAIL_ALLOWED_SENDERS` is optional and defaults to `INSTINCT_EMAIL`. Changing a variable does not affect what is already deployed: redeploy.
 

@@ -17,14 +17,14 @@ You own the email channel and the Instinct adapter. Read `PRD.md` sections 3, 7,
 What is known about Instinct:
 
 - No public API, MCP or webhooks are documented. Do not assume any exist.
-- Its terms allow personal use only and ban bots, scrapers and reverse engineering. It can bind Lucas to agreements and transactions.
+- Its terms allow personal use only and ban bots, scrapers and reverse engineering. It can bind the owner to agreements and transactions.
 - Whether it accepts mail from arbitrary senders is unverified until G1.
 
 Forbidden, whatever the deadline:
 
-- Automating iMessage, WhatsApp or SMS from Lucas's account.
+- Automating iMessage, WhatsApp or SMS from the owner's account.
 - Scraping or reverse engineering `app.instinct.com`.
-- Sending credentials, customer data or FreeTicket data through this channel.
+- Sending credentials or customer data through this channel.
 
 Rules for email:
 

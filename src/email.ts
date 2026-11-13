@@ -95,7 +95,8 @@ export function emailConfig(env: Record<string, string | undefined>): EmailConfi
   if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain)) throw new Error('EMAIL_DOMAIN must be a bare domain');
   const instinctAddress = normalized(value('INSTINCT_EMAIL'));
   if (!instinctAddress) throw new Error('INSTINCT_EMAIL must be an email address');
-  // ponytail: LUCAS_EMAIL fallback keeps existing deployments up; drop it once they set OWNER_EMAIL.
+  // ponytail: LUCAS_EMAIL fallback keeps existing deployments up; removed in 0.3.0.
+  if (!env.OWNER_EMAIL) console.warn('LUCAS_EMAIL is deprecated and will be removed in 0.3.0; set OWNER_EMAIL');
   const ownerAddress = normalized((env.OWNER_EMAIL || env.LUCAS_EMAIL)!);
   if (!ownerAddress) throw new Error('OWNER_EMAIL must be an email address');
   const senders = (env.EMAIL_ALLOWED_SENDERS || value('INSTINCT_EMAIL')).split(',').map(normalized);
