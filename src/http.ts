@@ -6,6 +6,7 @@ import { routePath } from 'hono/route';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { mountActivation } from './activation.ts';
+import { mountDashboard } from './dashboard.ts';
 import { fill, instructionsFor, versionOf } from './instructions.ts';
 import { claimReply, pendingTasks, PendingInput } from './claim.ts';
 import { logError } from './log.ts';
@@ -36,6 +37,10 @@ const TaskId = z.uuid();
 export type AppOptions = {
   /** Bearer token for /cron/dispatch. Unset or short means that route always answers 401. */
   cronSecret?: string | undefined;
+  /** Bearer token for /dashboard/conversations, owner only. Unset, short or equal to another secret means always 401. */
+  dashboardToken?: string | undefined;
+  /** The bridge's other secrets (webhook keys, signing secrets). The dashboard token must differ from all of them. */
+  secrets?: (string | undefined)[];
   /** One dispatcher pass behind the breaker. */
   pass?: () => Promise<number>;
   /** Keeps the function alive for work that outlives the response. */
@@ -92,6 +97,10 @@ export function createApp(pool: Pool, keys: Record<string, string>, options: App
       return c.json({ error: 'dispatch_failed' }, 500);
     }
   });
+
+  // Before auth: the owner is no agent, and an agent key must not open it.
+  mountDashboard(app, pool, options.dashboardToken,
+    [...Object.values(keys), options.cronSecret, ...(options.secrets ?? [])].filter((s): s is string => !!s));
 
   app.use(async (c, next) => {
     const token = bearerOf(c);

@@ -15,7 +15,8 @@
     "db:apply": "node --env-file-if-exists=.env.local db/apply.ts",
     "db:migrate": "node --env-file-if-exists=.env.local db/migrate.ts",
     "db:smoke": "node --env-file-if-exists=.env.local db/smoke.ts",
-    "test": "node --env-file-if-exists=.env.local --test --test-concurrency=1 --test-timeout=240000 test/core.test.ts test/memory.test.ts test/grok.test.ts test/ops.test.ts test/audit.test.ts test/vercel.test.ts test/email.test.ts test/activation.test.ts test/cli.test.ts test/cli-routes.test.ts",
+    "conversations:export": "node --env-file-if-exists=.env.local db/export-conversations.ts",
+    "test": "node --env-file-if-exists=.env.local --test --test-concurrency=1 --test-timeout=240000 test/core.test.ts test/memory.test.ts test/grok.test.ts test/ops.test.ts test/audit.test.ts test/vercel.test.ts test/email.test.ts test/activation.test.ts test/cli.test.ts test/cli-routes.test.ts test/dashboard.test.ts",
     "typecheck": "tsc"
   },
   "dependencies": {

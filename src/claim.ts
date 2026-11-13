@@ -73,7 +73,7 @@ export async function claimReply(pool: Pool, rawId: string, agent: string) {
   return {
     claimed: true,
     task: { id: t.id, intent: stripHidden(t.intent), from_agent: t.from_agent, risk: t.risk, hop: t.hop, deadline_at: t.deadline_at },
-    next: 'Do the task, then call task_complete before deadline_at.',
+    next: 'Do the task, then close it with POST /tasks/:id/complete or /fail (task_complete over MCP) before deadline_at.',
     data_label: DATA_LABEL,
     data: { from_agent: t.from_agent, input: stripHiddenDeep(t.input), context },
   };

@@ -65,7 +65,8 @@ export function createBridge(env: Env, { defer = waitUntil as (p: Promise<unknow
     if (mail) await sendDelegationResults(pool, mail.config, mail.provider).catch((e: unknown) => logError('email results', e));
     return claimed;
   };
-  const options = { cronSecret: env.CRON_SECRET, pass, defer };
+  const secrets = [env.GROK_WEBHOOK_KEY, env.EMAIL_TOKEN_SECRET, env.RESEND_WEBHOOK_SECRET, env.RESEND_API_KEY];
+  const options = { cronSecret: env.CRON_SECRET, dashboardToken: env.DASHBOARD_TOKEN, secrets, pass, defer };
 
   const app = createApp(pool, keys, options);
   const dispatch = dispatchSoon(options);

@@ -1,0 +1,22 @@
+# gitleaks config: the default rules plus one narrow allowlist. Needs gitleaks 8.21 or later ([[allowlists]]).
+[extend]
+useDefault = true
+
+# The public worked example from the Svix manual webhook verification docs, used as a test vector.
+# targetRules keeps it narrow: without it, an AND allowlist with paths makes gitleaks skip the whole file.
+[[allowlists]]
+description = "Svix docs example webhook secret"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^test/email\.test\.ts$''']
+regexTarget = "match"
+regexes = ['''whsec_plJ3nmyCDGBKInavdOK15jsl''']
+
+# A fake AWS key id used as a test vector for secret redaction.
+[[allowlists]]
+description = "Fake AWS key id test vector"
+targetRules = ["aws-access-token"]
+condition = "AND"
+paths = ['''^test/email\.test\.ts$''']
+regexTarget = "match"
+regexes = ['''AKIAABCDEFGHIJKLMNOP''']

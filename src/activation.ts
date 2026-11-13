@@ -21,6 +21,8 @@ const grok = (origin: string) => `Connect a routine agent (Grok Bot) to agent-br
 
 ${NOTICE}
 
+Full guide, with troubleshooting: docs/grok-bot.md in the agent-bridge repository.
+
 1. Use a dedicated bot, and connect only what it needs. If its settings can allow one command without asking, allow
    only curl to ${origin}. Do not allow all shell commands: a page the bot reads could then run anything.
 
@@ -32,10 +34,17 @@ ${NOTICE}
 
 4. Ask it to create a routine with a Webhook trigger, with the text below as its instruction.
 
-5. From the routine panel, copy "POST to" and "key" (not "header") into GROK_WEBHOOK_URL and GROK_WEBHOOK_KEY, and
-   redeploy.
+5. From the routine panel, copy "POST to" and "key" (not "header") into GROK_WEBHOOK_URL and GROK_WEBHOOK_KEY, in
+   the Production environment only, and redeploy. A wrong key makes every delivery fail with 401.
 
-6. Test: create a "research" task for grok. It must end completed, and the bot must tell you in its chat.
+6. Test, with the key of another registered agent (not grok's). Read it without echo, so it stays out of your
+   shell history:
+     read -rs OTHER_AGENT_KEY
+     curl -sS ${origin}/tasks -H "Authorization: Bearer $OTHER_AGENT_KEY" -H "Content-Type: application/json" \\
+       -d '{"to_agent":"grok","intent":"research","input":{"query":"What is 2 + 2?"},"idempotency_key":"first-test"}'
+   Then GET ${origin}/tasks/<id> with the same key. Within a few minutes it must be completed, and the bot must tell
+   you in its chat. Do not test with the routine's Test button: it sends no task_id, so the run stops and only
+   spends quota.
 
 Updates: the routine fetches its working instructions from ${origin}/instructions on every run. After you deploy a
 new version of the bridge, the next run uses it. Paste this text again only if this page says the bootstrap changed.

@@ -7,7 +7,9 @@ The bridge talks to two kinds of agent:
 | Routine agent | Grok Bot | A webhook that starts a routine run | `curl` to the HTTP API | `grok` |
 | CLI agent | Instinct, a local Claude | An email (`email`) or nothing, it polls (`http`) | `cli/bridge.mjs` | `email`, `http` |
 
-Step-by-step setup, with your deployment's URL filled in, is at `/activate/grok` and `/activate/instinct`.
+Step-by-step setup, with your deployment's URL filled in, is at `/activate/grok` and `/activate/instinct`. The full Grok Bot guide, with usage costs and troubleshooting, is [`grok-bot.md`](grok-bot.md).
+
+The routine agent uses `curl` because Grok Bot cannot give a custom MCP server a bearer header. The bridge also serves an MCP server at `/mcp`, with the same key, for clients that can.
 
 ## How instructions stay current
 
@@ -68,15 +70,15 @@ Owner notes (optional; they add to the instructions and cannot relax their limit
 none
 ```
 
-Setup, in order:
+Setup, in order (details and troubleshooting in [`grok-bot.md`](grok-bot.md)):
 
 1. Register the agent: a key in `BRIDGE_AGENT_KEYS`, then `INSERT INTO bridge.agent (id, adapter) VALUES ('grok', 'grok')`. Deploy.
 2. Use a dedicated bot with only what it needs connected. Connected services belong to the whole account, so this reduces the risk but does not isolate it.
 3. Ask the bot to open its secure secret input for `BRIDGE_TOKEN`, and paste the key there. Never in the chat.
-4. Create a routine with a **Webhook** trigger and the bootstrap above.
-5. Copy the routine's **POST to** and **key** into `GROK_WEBHOOK_URL` (must be `https`) and `GROK_WEBHOOK_KEY` (16+ visible characters, no spaces). Production only. Redeploy. If one is missing, the adapter does not load, the bridge logs it, and tasks for the agent wait without spending attempts. Never put these values in `agent.config`.
+4. Let `curl` to your bridge run without an approval card (a narrow allow rule), or routine runs stall until the card expires. Create a routine with a **Webhook** trigger and the bootstrap above.
+5. Copy the routine's **POST to** and **key** (not **header**) into `GROK_WEBHOOK_URL` (must be `https`) and `GROK_WEBHOOK_KEY` (16+ visible characters, no spaces). Production only. Redeploy. If one is missing, the adapter does not load, the bridge logs it, and tasks for the agent wait without spending attempts. Never put these values in `agent.config`.
 
-To rotate `GROK_WEBHOOK_KEY`: regenerate it in the routine, change it in Vercel and redeploy. Deliveries fail and retry in between, and those failures count towards the circuit breaker below.
+To rotate `GROK_WEBHOOK_KEY`: pause the adapter (`docs/runbook.md`), regenerate it in the routine, change it in Vercel, redeploy and resume. Without the pause, deliveries fail and retry in between, and those failures count towards the circuit breaker below.
 
 The webhook only carries `task_id`, because its body is not signed. The task itself is read from the bridge with the claim.
 

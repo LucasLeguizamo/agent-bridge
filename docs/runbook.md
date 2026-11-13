@@ -20,8 +20,6 @@ Names only. Values never go in the repo or in chat.
 | Supabase Vault | `bridge_url`, `bridge_cron_secret` |
 | `.env.local` only, never in Vercel | `ADMIN_DATABASE_URL`, `BRIDGE_DB_PASSWORD`, `TEST_DATABASE_URL` |
 
-`LUCAS_EMAIL` is still read as a fallback for `OWNER_EMAIL`, with a warning, until 0.3.0.
-
 Production only, on purpose: a preview without variables answers 500 instead of talking to the real database. Without both Grok variables, or without the six required email variables (`RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_DOMAIN`, `EMAIL_TOKEN_SECRET`, `INSTINCT_EMAIL`, `OWNER_EMAIL`), that adapter does not load and its tasks stay queued without spending attempts. `EMAIL_ALLOWED_SENDERS` is optional and defaults to `INSTINCT_EMAIL`. Changing a variable does not affect what is already deployed: redeploy.
 
 ## Database TLS
@@ -32,7 +30,7 @@ To enable verification: Database > Settings > SSL Configuration > Download Certi
 
 ## First deployment
 
-Each step depends on the previous one. In particular, the Grok webhook goes last because the routine needs the `/mcp` URL, which does not exist until you deploy.
+Each step depends on the previous one. In particular, the Grok webhook goes last because the routine needs the deployment URL, which does not exist until you deploy.
 
 1. **Backup** (below), if there is already data.
 
@@ -105,7 +103,7 @@ Each step depends on the previous one. In particular, the Grok webhook goes last
 
 10. **Uptime check:** an external service that calls `GET /health` every 5 minutes or more. It answers 200 or 503 and nothing else. Vercel restarts nothing because of this: it only serves to alert you. Each call is one invocation and one read.
 
-11. **Activate Grok Bot** following `/activate/grok`: with the URL now created, configure the MCP and the routine. Then load `GROK_WEBHOOK_URL` and `GROK_WEBHOOK_KEY` and redeploy. **G2 is done here**, with a test Bot.
+11. **Activate Grok Bot** following `/activate/grok` and [`grok-bot.md`](grok-bot.md): with the URL now created, give the Bot its `BRIDGE_TOKEN` and create the routine. Then load `GROK_WEBHOOK_URL` and `GROK_WEBHOOK_KEY` and redeploy, and send the first test task.
 
 ## Later deployments
 
