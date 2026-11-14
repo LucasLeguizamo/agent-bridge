@@ -1,4 +1,6 @@
 import type { Pool } from 'pg';
+import { raiseAlert } from './alert.ts';
+import { logBridgeEvent } from './log.ts';
 import type { Adapter, Adapters } from './queue.ts';
 import { CLAIM_GRACE_SECONDS } from './tasks.ts';
 
@@ -85,7 +87,7 @@ export async function breakerOpen(pool: Pool, graceSeconds = CLAIM_GRACE_SECONDS
   if (r!.paused) return true;
   if (!r!.trip) return false;
   // The WHERE on the upsert means concurrent passes raise a single alert.
-  await pool.query(
+  const { rowCount } = await pool.query(
     `WITH up AS (
        INSERT INTO adapter_pause (adapter, paused_until, reason)
        VALUES ($1, now() + $2::interval, 'runs_without_claim')
@@ -98,6 +100,11 @@ export async function breakerOpen(pool: Pool, graceSeconds = CLAIM_GRACE_SECONDS
      FROM up`,
     [GROK_ADAPTER, PAUSE, JSON.stringify(r!.tasks)],
   );
+  if (rowCount) {
+    logBridgeEvent('breaker.opened', { adapter: GROK_ADAPTER, tasks: r!.tasks.length, reason: 'runs_without_claim' });
+    raiseAlert({ alert: 'grok_breaker_open', key: GROK_ADAPTER,
+      text: `grok_breaker_open: ${r!.tasks.length} runs without a claim, sends to grok paused for 1 hour` });
+  }
   return true;
 }
 

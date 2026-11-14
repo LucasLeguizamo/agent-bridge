@@ -6,6 +6,7 @@ import pg from 'pg';
 import { createApp } from '../src/http.ts';
 import { ackDelivered, claim, MAX_ATTEMPTS, nackDelivery, runOnce, type Adapters, type ClaimedTask } from '../src/queue.ts';
 import { DAILY_PAIR_CAP, MAX_HOPS, type Task, MAX_CHILDREN } from '../src/tasks.ts';
+import { alertWebhook, configureAlerts, raiseAlert } from '../src/alert.ts';
 import { openTestSchema } from './pg.ts';
 
 const KEYS = { grok: 'g'.repeat(32), instinct: 'i'.repeat(32), claude: 'c'.repeat(32) };
@@ -677,5 +678,147 @@ describe('audit fixes', () => {
       method: 'POST', body, headers: { authorization: `Bearer ${KEYS.grok}`, 'content-length': String(body.length) },
     });
     assert.equal(authed.status, 413);
+  });
+});
+
+describe('observability', () => {
+  const CANARY = 'canary-7f3a9e';
+  // Every stdout line a test produced that is a transition log.
+  const transitions = (calls: { arguments: unknown[] }[]) => calls
+    .map((c) => String(c.arguments[0]))
+    .filter((l) => l.startsWith('{'))
+    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .filter((l) => typeof l.event === 'string');
+
+  test('one line per transition, from an allowlist of fields, with no content', async (t) => {
+    const log = t.mock.method(console, 'log', () => {});
+    const payload = newTask({ input: { query: `find ${CANARY}`, note: `x@${CANARY}.com` } });
+    const { body: { task } } = await call('grok', 'POST', '/tasks', payload);
+    await call('grok', 'POST', '/tasks', payload); // A replay is not a transition.
+    await runOnce(pool, adapters);
+    await call('instinct', 'POST', `/tasks/${task.id}/complete`, { output: { answer: CANARY } });
+    // Free-text intent is the sender's text: it must not reach the log either.
+    const custom = await create('grok', { intent: `pay ${CANARY}` });
+
+    const raw = log.mock.calls.map((c) => String(c.arguments[0])).join('\n');
+    assert.ok(!raw.includes(CANARY), 'no input, output or free-text intent in stdout');
+    const lines = transitions(log.mock.calls);
+    assert.deepEqual(lines.filter((l) => l.task === task.id).map((l) => l.event),
+      ['task.created', 'task.delivered', 'task.completed']);
+    const allowed = new Set(['ts', 'event', 'task', 'intent', 'from', 'to', 'state', 'attempt', 'ms', 'reason']);
+    for (const l of lines) {
+      assert.deepEqual(Object.keys(l).filter((k) => !allowed.has(k)), [], `only allowlisted fields: ${l.event}`);
+    }
+    const done = lines.find((l) => l.event === 'task.completed')!;
+    assert.equal(done.intent, 'research');
+    assert.equal(done.from, 'grok');
+    assert.equal(done.to, 'instinct');
+    assert.equal(done.state, 'completed');
+    assert.equal(done.attempt, 1);
+    assert.equal(typeof done.ms, 'number');
+    assert.ok(!Number.isNaN(Date.parse(String(done.ts))));
+    const held = lines.find((l) => l.task === custom.body.task.id)!;
+    assert.deepEqual([held.event, held.intent, held.state], ['task.held', 'other', 'input_required']);
+  });
+
+  test('retries, exhaustion, expiry and the pair breaker are logged once each', async (t) => {
+    const log = t.mock.method(console, 'log', () => {});
+    const { body: { task } } = await create('grok');
+    failNext = 1;
+    await runOnce(pool, adapters);
+    await pool.query(`UPDATE task SET attempts = $2 - 1, next_attempt_at = now() WHERE id = $1`, [task.id, MAX_ATTEMPTS]);
+    failNext = 1;
+    await runOnce(pool, adapters);
+    const late = await create('grok');
+    await pool.query(`UPDATE task SET deadline_at = now() - interval '1 second' WHERE id = $1`, [late.body.task.id]);
+    await runOnce(pool, adapters);
+    await pool.query(`UPDATE task SET created_at = created_at - interval '2 days'`);
+    await pool.query(
+      `INSERT INTO task (root_id, from_agent, to_agent, intent, input, risk, state, idempotency_key, deadline_at)
+       SELECT gen_random_uuid(), 'claude', 'grok', 'research', jsonb_build_object('n', n), 'read', 'completed',
+              'cap-' || n, now() + interval '1 hour'
+       FROM generate_series(1, $1::int) n`, [DAILY_PAIR_CAP]);
+    const capped = await create('claude', { to_agent: 'grok' });
+
+    const lines = transitions(log.mock.calls);
+    const of = (id: string) => lines.filter((l) => l.task === id).map((l) => `${l.event}:${l.reason ?? ''}`);
+    assert.deepEqual(of(task.id), ['task.created:', 'task.retry:', 'task.failed:delivery_exhausted']);
+    assert.deepEqual(of(late.body.task.id), ['task.created:', 'task.expired:deadline_exceeded']);
+    assert.deepEqual(of(capped.body.task.id), ['task.rejected:daily_cap', 'pair.paused:daily_cap']);
+  });
+});
+
+describe('alert delivery', () => {
+  const received: Record<string, unknown>[] = [];
+  let status = 200;
+  let server: import('node:http').Server;
+  let url = '';
+  let pending: Promise<unknown>[] = [];
+  const flush = async () => { await Promise.all(pending); pending = []; };
+
+  before(async () => {
+    const { createServer } = await import('node:http');
+    server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => { received.push(JSON.parse(body)); res.statusCode = status; res.end(); });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    url = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/hook`;
+  });
+  after(() => { configureAlerts({ sinks: [] }); server?.close(); });
+  beforeEach(() => {
+    received.length = 0;
+    status = 200;
+    configureAlerts({ sinks: [alertWebhook(url)!], defer: (p) => { pending.push(p); } });
+  });
+
+  test('only https, or http on localhost', () => {
+    assert.equal(alertWebhook(undefined), null);
+    assert.ok(alertWebhook('https://hooks.example.com/x'));
+    assert.ok(alertWebhook('http://localhost:9/x'));
+    assert.throws(() => alertWebhook('http://hooks.example.com/x'), /ALERT_WEBHOOK_URL must be/);
+    assert.throws(() => alertWebhook('not a url'), /ALERT_WEBHOOK_URL must be/);
+    // Credentials would be quoted by fetch's TypeError, and so logged on every alert.
+    assert.throws(() => alertWebhook('https://user:secret-canary@ntfy.example/topic'), (e: Error) => /ALERT_WEBHOOK_URL must be/.test(e.message) && !e.message.includes('secret-canary'));
+  });
+
+  test('an alert the bridge writes is POSTed with no content, and the same one at most once per window', async () => {
+    await pool.query(
+      `INSERT INTO task (root_id, from_agent, to_agent, intent, input, risk, state, idempotency_key, deadline_at, created_at)
+       SELECT gen_random_uuid(), 'grok', 'instinct', 'research', jsonb_build_object('n', n), 'read', 'completed',
+              'cap-' || n, now() + interval '1 hour', now() - interval '1 hour'
+       FROM generate_series(1, $1::int) n`, [DAILY_PAIR_CAP]);
+    const capped = await create('grok', { input: { query: 'canary-7f3a9e' } });
+    await flush();
+    assert.equal(received.length, 1);
+    const [a] = received;
+    assert.deepEqual(Object.keys(a!).sort(), ['alert', 'task', 'text', 'ts']);
+    assert.equal(a!.alert, 'pair_paused');
+    assert.equal(a!.task, capped.body.task.id);
+    assert.match(String(a!.text), /pair_paused.*grok.*instinct/);
+    assert.ok(!JSON.stringify(a).includes('canary'), 'no payload in the alert');
+
+    raiseAlert({ alert: 'pair_paused', key: 'grok|instinct', text: 'again' });
+    await flush();
+    assert.equal(received.length, 1, 'same kind and key inside the window is dropped');
+    raiseAlert({ alert: 'pair_paused', key: 'claude|grok', text: 'other pair' });
+    await flush();
+    assert.equal(received.length, 2, 'another key still goes out');
+  });
+
+  test('a failing receiver is logged and never throws', async (t) => {
+    const errors = t.mock.method(console, 'error', () => {});
+    status = 500;
+    raiseAlert({ alert: 'grok_breaker_open', key: 'grok', text: 'x' });
+    await flush();
+    configureAlerts({ sinks: [alertWebhook('http://127.0.0.1:1/closed')!], defer: (p) => { pending.push(p); } });
+    raiseAlert({ alert: 'grok_breaker_open', key: 'grok', text: 'x' });
+    await flush();
+    const logged = errors.mock.calls.map((c) => JSON.parse(String(c.arguments[0])) as { where: string; message: string });
+    assert.equal(logged.length, 2);
+    assert.ok(logged.every((l) => l.where === 'alert webhook'));
+    assert.match(logged[0]!.message, /responded 500/);
+    assert.ok(!logged.some((l) => l.message.includes('127.0.0.1')), 'the URL can be a secret: not in the log');
   });
 });

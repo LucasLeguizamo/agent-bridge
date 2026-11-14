@@ -1,6 +1,6 @@
 import type { Pool } from 'pg';
 import { z } from 'zod';
-import { logError } from './log.ts';
+import { logError, logTransition } from './log.ts';
 import { contextPack, DATA_LABEL } from './memory.ts';
 import { stripHidden, stripHiddenDeep } from './secrets.ts';
 import type { Task } from './tasks.ts';
@@ -53,6 +53,7 @@ export async function claimTask(pool: Pool, id: string, agent: string) {
      SELECT * FROM up`,
     [id, agent],
   );
+  if (t) logTransition('task.claimed', t);
   return t ?? null;
 }
 

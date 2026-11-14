@@ -2,6 +2,7 @@ import { attachDatabasePool, waitUntil } from '@vercel/functions';
 import { Hono } from 'hono';
 import pg from 'pg';
 import { z } from 'zod';
+import { alertWebhook, configureAlerts } from './alert.ts';
 import { connectionConfig } from './db.ts';
 import { createEmailAdapter, createResendProvider, EMAIL_ADAPTER, EMAIL_ENV, emailConfig, emailRoutes, sendDelegationResults } from './email.ts';
 import { breakerGate, createGrokAdapter, GROK_ADAPTER, grokConfig } from './grok.ts';
@@ -12,7 +13,7 @@ import { runPass, type Adapters } from './queue.ts';
 
 type Env = Record<string, string | undefined>;
 
-function agentKeys(raw: string | undefined) {
+export function agentKeys(raw: string | undefined) {
   try {
     return z.record(z.string(), z.string().min(32)).parse(JSON.parse(raw ?? ''));
   } catch {
@@ -38,6 +39,9 @@ export function createBridge(env: Env, { defer = waitUntil as (p: Promise<unknow
   if (!email && EMAIL_ENV.some((name) => env[name])) {
     console.warn(`Email adapter not loaded: ${[...EMAIL_ENV, 'OWNER_EMAIL'].join(', ')} must all be set`);
   }
+  // Optional. Alerts stay rows in `event` either way; this also notifies someone.
+  const webhook = alertWebhook(env.ALERT_WEBHOOK_URL);
+  configureAlerts({ sinks: webhook ? [webhook] : [], defer });
   if (!env.DATABASE_CA_PEM) console.warn('DATABASE_URL uses sslmode=require: encrypted, but the server is not verified');
 
   const pool = new pg.Pool({
@@ -71,10 +75,11 @@ export function createBridge(env: Env, { defer = waitUntil as (p: Promise<unknow
   const app = createApp(pool, keys, options);
   const dispatch = dispatchSoon(options);
   mountMcp(app, pool, dispatch);
-  if (!mail) return { app, pool };
+  // `pass` is returned for a long-running host (src/standalone.ts), which runs it on a timer instead of pg_cron.
+  if (!mail) return { app, pool, pass };
   // In front of the bearer middleware: the webhook authenticates with the provider's signature.
   const root = new Hono();
   root.route('/', emailRoutes(pool, mail.config, mail.provider, () => dispatch()));
   root.route('/', app);
-  return { app: root, pool };
+  return { app: root, pool, pass };
 }
