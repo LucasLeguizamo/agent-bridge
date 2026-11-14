@@ -504,9 +504,10 @@ describe('M6: TLS settings', () => {
 });
 
 describe('deploy files', () => {
-  test('the container files are gone, and no long-running process remains', () => {
-    for (const f of ['Dockerfile', '.dockerignore', 'fly.toml', 'src/main.ts']) assert.equal(existsSync(new URL(f, ROOT)), false, f);
+  test('Fly is gone, and the queue runs no loop of its own: only the self-host entry has a timer', () => {
+    for (const f of ['fly.toml', 'src/main.ts']) assert.equal(existsSync(new URL(f, ROOT)), false, f);
     assert.doesNotMatch(read('src/queue.ts'), /setInterval|setTimeout\(loop|startDispatcher/);
+    assert.doesNotMatch(read('src/index.ts'), /setInterval|standalone/);
     assert.doesNotMatch(read('package.json'), /src\/main\.ts/);
   });
 

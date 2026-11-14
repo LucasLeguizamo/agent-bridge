@@ -97,6 +97,13 @@ const COMMANDS = [
     request: () => ({ method: 'GET', path: '/instructions' }),
   },
   {
+    name: 'doctor', summary: 'Check this agent\'s setup: bridge URL, /health, token, agent enabled, instructions. '
+      + 'Exits 0 only if every check passes. Prints each check with a fix on stderr.',
+    args: [], flags: [], doctor: true,
+    example: 'bridge doctor',
+    request: () => ({ method: 'GET', path: '/health' }),
+  },
+  {
     name: 'update', summary: 'Replace this CLI with the version the bridge serves, only if its sha256 matches. Needs no token.',
     args: [], flags: ['sha256'], local: true,
     example: 'bridge update',
@@ -502,6 +509,60 @@ async function runList(ctx, cmd, req, values) {
   return { ...first.body, [key]: items, ...(pages ? { next_cursor: null } : {}) };
 }
 
+// Each check is ours to word: what the server sends is only read for a status, an agent id or a version.
+async function doctor(values, env, timeoutMs) {
+  const checks = [];
+  const add = (name, ok, detail, fix) => checks.push({ name, ok, detail, ...(ok || !fix ? {} : { fix }) });
+  const code = (v) => (typeof v === 'string' && SAFE_CODE.test(v) ? v : 'unknown');
+  let base;
+  try {
+    base = bridgeUrl(env);
+    add('url', true, 'BRIDGE_URL is set and uses https or loopback');
+  } catch (e) {
+    add('url', false, e.message, 'set BRIDGE_URL to the https address of your bridge');
+  }
+  if (base) {
+    try {
+      const res = await fetch(urlFor(base, '/health'), { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
+      await res.body?.cancel().catch(() => {});
+      if (res.ok) add('health', true, 'the bridge answers and reaches its database');
+      else if (res.status === 503) add('health', false, 'the bridge answers, but cannot reach its database', 'tell the owner: run pnpm bridge:doctor on the server');
+      else add('health', false, `GET /health answered HTTP ${res.status}`, 'check BRIDGE_URL points at the bridge, not another site');
+    } catch {
+      add('health', false, 'could not reach the bridge', 'check BRIDGE_URL and the network; the bridge may be down');
+    }
+  }
+  let token;
+  try {
+    token = await loadToken(values, env);
+    add('token', true, 'present and well formed');
+  } catch (e) {
+    add('token', false, e.message, 'set BRIDGE_TOKEN to this agent\'s key, or pass it with --token-stdin');
+  }
+  if (base && token) {
+    const ctx = { base, timeoutMs, token };
+    try {
+      const r = await send(ctx, { method: 'GET', path: '/whoami' });
+      add('agent', true, `the token belongs to ${code(r.body.agent)}, which is enabled`);
+      try {
+        const i = await send(ctx, { method: 'GET', path: '/instructions' });
+        add('instructions', true, `served, version ${code(i.body.version)}`);
+      } catch (e) {
+        add('instructions', false, e.message, 'tell the owner; bridge instructions should print them');
+      }
+    } catch (e) {
+      const fix = e.exit === EXIT.auth ? 'the key does not match BRIDGE_AGENT_KEYS on the bridge: ask the owner for this agent\'s key'
+        : e.exit === EXIT.scope ? 'the agent is disabled or not registered: ask the owner to run pnpm bridge:setup or turn it back on'
+          : 'retry later; if it persists, tell the owner';
+      add('agent', false, e.message, fix);
+    }
+  }
+  for (const c of checks) process.stderr.write(`${scrub(`${c.ok ? '✓' : '✗'} ${c.name}: ${c.detail}${c.fix ? `\n    fix: ${c.fix}` : ''}`)}\n`);
+  const ok = checks.every((c) => c.ok);
+  printJson({ ok, checks });
+  if (!ok) process.exitCode = EXIT.failed;
+}
+
 async function run(argv, env) {
   // A malformed token is never sent, so no server can echo it, and scrubbing "e" would wreck the JSON.
   const envToken = env.BRIDGE_TOKEN?.replace(/\r?\n$/, '');
@@ -523,6 +584,7 @@ async function run(argv, env) {
 
   checkUse(cmd, args, values);
   const timeoutMs = timeoutOf(values);
+  if (cmd.doctor) return doctor(values, env, timeoutMs);
   const req = cmd.request(args, values);
   const key = values['idempotency-key'];
   // Only tasks create stores a key. The other writes are naturally repeatable; the header is there for a server that reads it.

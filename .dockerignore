@@ -1,0 +1,13 @@
+# Secrets and local state never enter the image: configuration comes from the environment at run time.
+.env*
+*.dump
+node_modules
+.git
+.github
+.claude
+.engram
+.vercel
+exports
+test
+docs
+*.md
