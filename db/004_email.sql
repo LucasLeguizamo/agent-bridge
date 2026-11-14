@@ -50,12 +50,15 @@ CREATE TABLE email_outbound (
 );
 
 -- Same protection as bridge_access.sql, which only covers tables that existed when it ran.
--- Conditional because test schemas have no bridge_app.
+-- Conditional because test schemas have no bridge_app, and plain Postgres has no Supabase roles.
 REVOKE ALL ON email_inbound, email_outbound FROM PUBLIC;
 DO $$
+DECLARE r text;
 BEGIN
   IF to_regrole('bridge_app') IS NOT NULL THEN
-    REVOKE ALL ON email_inbound, email_outbound FROM anon, authenticated, service_role;
+    FOREACH r IN ARRAY ARRAY['anon', 'authenticated', 'service_role'] LOOP
+      IF to_regrole(r) IS NOT NULL THEN EXECUTE format('REVOKE ALL ON email_inbound, email_outbound FROM %I', r); END IF;
+    END LOOP;
     GRANT SELECT, INSERT, UPDATE ON email_inbound, email_outbound TO bridge_app;
     GRANT USAGE ON SEQUENCE email_outbound_id_seq TO bridge_app;
   END IF;

@@ -15,12 +15,15 @@ CREATE TABLE adapter_pause (
 CREATE INDEX event_grok_run ON event (id DESC) WHERE type = 'grok_run_started';
 
 -- Same protection as bridge_access.sql, which only covers tables that existed when it ran.
--- Conditional because test schemas have no bridge_app.
+-- Conditional because test schemas have no bridge_app, and plain Postgres has no Supabase roles.
 REVOKE ALL ON adapter_pause FROM PUBLIC;
 DO $$
+DECLARE r text;
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bridge_app') THEN
-    REVOKE ALL ON adapter_pause FROM anon, authenticated, service_role;
+    FOREACH r IN ARRAY ARRAY['anon', 'authenticated', 'service_role'] LOOP
+      IF to_regrole(r) IS NOT NULL THEN EXECUTE format('REVOKE ALL ON adapter_pause FROM %I', r); END IF;
+    END LOOP;
     GRANT SELECT, INSERT, UPDATE ON adapter_pause TO bridge_app;
   END IF;
 END $$;
