@@ -6,6 +6,7 @@ description: >-
   auth, run limits, quota protection and the Grok circuit breaker. Invoke for
   anything about waking Grok Bot, or when G2 test results change the plan.
 tools: Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch
+model: sonnet
 skills:
   - mcp-builder
   - hono

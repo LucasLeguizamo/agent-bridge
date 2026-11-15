@@ -7,6 +7,7 @@ description: >-
   implement fixes. Invoke before merging any adapter, memory, approval or policy
   change, and before any deployment.
 tools: Read, Grep, Glob, Bash, WebFetch
+model: opus
 skills:
   - supabase
 ---

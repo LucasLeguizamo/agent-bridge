@@ -7,6 +7,7 @@ description: >-
   searched or injected into a task, or when deciding whether pgvector or an
   extraction step is justified.
 tools: Read, Grep, Glob, Bash, Edit, Write
+model: sonnet
 skills:
   - supabase-postgres-best-practices
   - zod

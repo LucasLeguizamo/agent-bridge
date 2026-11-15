@@ -6,6 +6,7 @@ description: >-
   quarantine, threading, email flags and the MEMORY parser. Invoke for anything
   about how Instinct is reached, or when G1 test results change the plan.
 tools: Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch
+model: sonnet
 skills:
   - hono
   - zod
