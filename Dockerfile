@@ -1,12 +1,12 @@
 # Self-host image: the bridge as one long-running Node process. Vercel does not use this file; its entry is src/index.ts.
 # Node runs the TypeScript directly (type stripping), so there is no build step.
-FROM node:24-slim AS deps
+FROM node:26-slim AS deps
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
 RUN corepack enable && corepack prepare pnpm@10.33.0 --activate \
   && pnpm install --frozen-lockfile --prod
 
-FROM node:24-slim
+FROM node:26-slim
 # Inside a container the bridge must listen on all interfaces; compose publishes it on 127.0.0.1 only.
 ENV NODE_ENV=production PORT=3000 HOST=0.0.0.0
 WORKDIR /app
