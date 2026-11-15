@@ -381,7 +381,9 @@ describe('M4: size and rate caps', () => {
 });
 
 describe('M5: request log', () => {
-  const lines = (fn: { mock: { calls: { arguments: unknown[] }[] } }) => fn.mock.calls.map((c) => JSON.parse(String(c.arguments[0])) as Record<string, any>);
+  // stdout also carries task transition lines (src/log.ts); these tests are about the request lines.
+  const lines = (fn: { mock: { calls: { arguments: unknown[] }[] } }) => fn.mock.calls
+    .map((c) => JSON.parse(String(c.arguments[0])) as Record<string, any>).filter((l) => 'route' in l);
 
   test('one line per request with agent, route and status, and never the query, body or key', async (t) => {
     const log = t.mock.method(console, 'log', () => {});

@@ -5,7 +5,8 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import { logError } from './log.ts';
 import { contextPack, memoryWrite } from './memory.ts';
-import type { Adapter } from './queue.ts';
+import { raiseAlert } from './alert.ts';
+import { failedAlert, type Adapter } from './queue.ts';
 import { containsSecret, containsSecretDeep } from './secrets.ts';
 import { BridgeError, createTask, finishTask, tx, type Json, type Task } from './tasks.ts';
 
@@ -345,16 +346,19 @@ export function createEmailAdapter(pool: Pool, cfg: EmailConfig, provider: Email
       // A retry cannot help, and the text must not reach an event. The ack that follows is fenced on state, so it no-ops.
       // Tested before dataLine: JSON writes a line break as \n, whose `n` would hide a secret's word boundary.
       if (containsSecretDeep(task.input) || containsSecret(subject)) {
-        await pool.query(
+        const { rows: [up] } = await pool.query<Task>(
           `WITH up AS (
              UPDATE task SET state = 'failed', output = '{"error":"secret_blocked"}'
              WHERE id = $1 AND attempts = $2 AND state = 'submitted'
-             RETURNING id
+             RETURNING *
+           ), ev AS (
+             INSERT INTO event (task_id, actor, type, payload)
+             SELECT id, 'bridge', 'alert', '{"alert":"secret_blocked"}' FROM up
            )
-           INSERT INTO event (task_id, actor, type, payload)
-           SELECT id, 'bridge', 'alert', '{"alert":"secret_blocked"}' FROM up`,
+           SELECT * FROM up`,
           [task.id, task.attempts],
         );
+        if (up) failedAlert(up, 'secret_blocked');
         return;
       }
 
@@ -656,6 +660,8 @@ export async function sendDelegationResults(pool: Pool, cfg: EmailConfig, provid
       if (withheld) {
         await pool.query(
           `INSERT INTO event (task_id, actor, type, payload) VALUES ($1, 'bridge', 'alert', '{"alert":"secret_blocked"}')`, [r.task_id]);
+        raiseAlert({ alert: 'secret_blocked', key: `result|${r.to_agent}`, task: r.task_id,
+          text: `secret_blocked: result of task ${r.task_id} withheld from the delegation reply` });
       }
       sentCount++;
     } catch (e) {
@@ -666,6 +672,10 @@ export async function sendDelegationResults(pool: Pool, cfg: EmailConfig, provid
         [r.task_id, exhausted ? 'alert' : 'email_result_failed',
           JSON.stringify({ attempt: r.result_attempts, error, ...(exhausted ? { alert: 'email_result_exhausted' } : {}) })],
       );
+      if (exhausted) {
+        raiseAlert({ alert: 'email_result_exhausted', key: r.to_agent, task: r.task_id,
+          text: `email_result_exhausted: result mail for task ${r.task_id} failed ${r.result_attempts} times` });
+      }
     }
   }
   return sentCount;

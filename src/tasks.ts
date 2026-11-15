@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
+import { raiseAlert } from './alert.ts';
+import { logTransition } from './log.ts';
 import { containsSecret, containsSecretDeep } from './secrets.ts';
 
 export const MAX_HOPS = 4; // hop is 0-based, so a chain gets hops 0..3: four deliveries.
@@ -124,7 +126,7 @@ export async function createTask(pool: Pool, from: string, t: NewTask) {
   if (containsSecret(t.intent) || containsSecretDeep(t.input)) throw await refuseSecret(pool, from);
   // Keys are namespaced per sender so one agent cannot collide with or probe another's.
   const key = `${from}:${t.idempotency_key}`;
-  return tx(pool, async (c) => {
+  const out = await tx(pool, async (c) => {
     // Serializes per pair so concurrent creates cannot overshoot the cap. Released at commit: pooler safe.
     await c.query(
       `SELECT pg_advisory_xact_lock(hashtextextended(LEAST($1::text, $2::text) || '|' || GREATEST($1::text, $2::text), 0))`,
@@ -222,8 +224,19 @@ export async function createTask(pool: Pool, from: string, t: NewTask) {
       );
       await logEvent(c, task.id, 'bridge', 'alert', { alert: 'pair_paused', reason, from, to: t.to_agent });
     }
-    return { task, created: true };
+    return { task, created: true, reason };
   });
+  // After commit: a rolled-back create logs nothing, and a replay is not a transition.
+  if ('reason' in out) {
+    const { task, reason } = out;
+    logTransition(reason ? 'task.rejected' : task.state === 'input_required' ? 'task.held' : 'task.created', task, reason);
+    if (reason === 'hop_limit' || reason === 'daily_cap') {
+      logTransition('pair.paused', task, reason);
+      raiseAlert({ alert: 'pair_paused', key: [task.from_agent, task.to_agent].sort().join('|'), task: task.id,
+        text: `pair_paused ${task.from_agent} -> ${task.to_agent} for 1 hour (${reason})` });
+    }
+  }
+  return { task: out.task, created: out.created };
 }
 
 function logEvent(c: PoolClient, taskId: string, actor: string, type: string, payload: Json) {
@@ -270,7 +283,10 @@ export async function finishTask(pool: Pool, id: string, agent: string, state: '
      SELECT * FROM up`,
     [id, agent, state, JSON.stringify(output), CLAIM_ADAPTERS],
   );
-  if (t) return t;
+  if (t) {
+    logTransition(`task.${state}`, t);
+    return t;
+  }
   const cur = await getTask(pool, id, agent);
   if (cur.to_agent === agent && cur.state === state && isDeepStrictEqual(cur.output, output)) return cur;
   if (cur.to_agent === agent && (cur.state === 'working' || cur.state === 'submitted')) {
@@ -293,7 +309,10 @@ export async function cancelTask(pool: Pool, id: string, agent: string) {
      SELECT * FROM up`,
     [id, agent],
   );
-  if (t) return t;
+  if (t) {
+    logTransition('task.canceled', t);
+    return t;
+  }
   const cur = await getTask(pool, id, agent);
   if (cur.from_agent === agent && cur.state === 'canceled') return cur;
   throw new BridgeError(409, 'invalid_state');

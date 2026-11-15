@@ -1,11 +1,13 @@
 # agent-bridge runbook
 
-It runs on Vercel Hobby, with functions in a region near your database, and Postgres in a dedicated Supabase project. Use a dedicated Supabase project, never one shared with another product.
+It runs on Vercel Hobby, with functions in a region near your database, and Postgres in a dedicated Supabase project. Use a dedicated Supabase project, never one shared with another product. To run it on your own server with Docker instead, see [`self-host.md`](self-host.md).
 Deploying, migrating production, rotating keys or changing DNS is done by the owner, or needs the owner's explicit approval.
 
-**Pending before M5:** the restore procedure below is written but untested. The PRD requires a real test.
+**Pending before M5:** the Supabase restore procedure below is written but untested. The PRD requires a real test. The self-host restore was tested on 14 Nov 2026 ([`self-host.md`](self-host.md)).
 
-**Alerts:** today they are only rows in `event`. Nobody receives a notice, and if the bridge goes down none is written. Check them by hand.
+**What is wrong right now:** `pnpm bridge:doctor`, with the bridge's variables in `.env.local`. It checks the variables, the database as `bridge_app` (read only), the role timeouts, agent rows, adapters, whether the dispatcher keeps up, the alerts from the last day, the migrations (with `ADMIN_DATABASE_URL`) and the Data API exposure (with `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`). Exit code 1 if a required check fails. On an agent's machine, `bridge doctor` checks its URL, token and agent.
+
+**Alerts:** each alert is a row in `event`, and with `ALERT_WEBHOOK_URL` set it is also POSTed as `{"text": ...}` (Slack, or Discord with `/slack` at the end of the URL), deduped per kind and key for 10 minutes, per instance: on Vercel each warm instance may send its own first alert. If the bridge itself goes down nothing is written: point an external uptime monitor at `/health` (docs/self-host.md).
 
 **Activating agents:** `/activate/grok` and `/activate/instinct`, on your deployment URL, give the steps with that deployment's URL. They are public and have no keys and do not touch the database. Full guides: `docs/agents.md` and `docs/email.md`.
 
@@ -18,7 +20,7 @@ Names only. Values never go in the repo or in chat.
 | Vercel, **Production** only | `DATABASE_URL`, `BRIDGE_AGENT_KEYS`, `CRON_SECRET` |
 | Vercel, **Production** only, optional | `DATABASE_CA_PEM`, `GROK_WEBHOOK_URL`, `GROK_WEBHOOK_KEY`, `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_DOMAIN`, `EMAIL_TOKEN_SECRET`, `INSTINCT_EMAIL`, `OWNER_EMAIL`, `EMAIL_ALLOWED_SENDERS`, `DASHBOARD_TOKEN` |
 | Supabase Vault | `bridge_url`, `bridge_cron_secret` |
-| `.env.local` only, never in Vercel | `ADMIN_DATABASE_URL`, `BRIDGE_DB_PASSWORD`, `TEST_DATABASE_URL` |
+| `.env.local` only, never in Vercel | `ADMIN_DATABASE_URL`, `BRIDGE_DB_PASSWORD`, `TEST_DATABASE_URL`, `BRIDGE_AGENT_ADAPTERS` (optional, for setup), `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` (optional, for doctor) |
 
 Production only, on purpose: a preview without variables answers 500 instead of talking to the real database. Without both Grok variables, or without the six required email variables (`RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_DOMAIN`, `EMAIL_TOKEN_SECRET`, `INSTINCT_EMAIL`, `OWNER_EMAIL`), that adapter does not load and its tasks stay queued without spending attempts. `EMAIL_ALLOWED_SENDERS` is optional and defaults to `INSTINCT_EMAIL`. Changing a variable does not affect what is already deployed: redeploy.
 
@@ -42,25 +44,19 @@ Each step depends on the previous one. In particular, the Grok webhook goes last
 
    It must answer with the `PGRST106` error. If it returns rows or `[]`, stop: remove `bridge` from that list before going on.
 
-3. **Migrate:** `pnpm db:migrate`, with `ADMIN_DATABASE_URL` in `.env.local`. Each file runs in a transaction and is recorded in `bridge.schema_migration`. On a new project, run `pnpm db:apply` first.
+3. **Set up the database:** `pnpm bridge:setup`, with `ADMIN_DATABASE_URL` and `BRIDGE_AGENT_KEYS` in `.env.local`, and `BRIDGE_DB_PASSWORD` (`openssl rand -hex 32`) on a new project. Never `pnpm setup`: that is pnpm's own command and edits your shell profile. Safe to re-run; it prints one line per step:
 
-   **Role timeouts**, once, with the admin URL. A per-connection `statement_timeout` does not pass through the pooler in transaction mode, and without this the client's `query_timeout` does not stop the query on the server:
+   - creates the `bridge_app` role if missing (an existing one keeps its password);
+   - creates the `bridge` schema with `001_core.sql` and its grants if missing (what `pnpm db:apply` does);
+   - applies pending migrations, each in a transaction recorded in `bridge.schema_migration` (what `pnpm db:migrate` does);
+   - sets the role timeouts if they are not set: `statement_timeout = '10s'` and `idle_in_transaction_session_timeout = '15s'`. A per-connection `statement_timeout` does not pass through the pooler in transaction mode, and without this the client's `query_timeout` does not stop the query on the server;
+   - registers every id in `BRIDGE_AGENT_KEYS` in `bridge.agent`. The adapter comes from `BRIDGE_AGENT_ADAPTERS` (`{"id":"grok|email|http"}`), or else `grok` is `grok`, `instinct` is `email` and anything else is `http`. An agent row that already exists is never changed: if its line says the adapter differs, fix it by hand. Without a row, an agent gets 403.
 
-   ```sql
-   ALTER ROLE bridge_app SET statement_timeout = '10s';
-   ALTER ROLE bridge_app SET idle_in_transaction_session_timeout = '15s';
-   ```
-
-4. **Register the agents.** `bridge.agent` starts empty, and without a row each agent gets 403. The ids must match `BRIDGE_AGENT_KEYS`. With `psql` and the admin URL (see Backup to build `LIBPQ_URL`):
-
-   ```sh
-   psql -d "$LIBPQ_URL" -c "INSERT INTO bridge.agent (id, adapter) VALUES ('grok', 'grok'), ('claude', 'http') ON CONFLICT (id) DO NOTHING"
-   psql -d "$LIBPQ_URL" -c "SELECT id, adapter, enabled FROM bridge.agent ORDER BY id"
-   ```
-
-   Check the result: `ON CONFLICT DO NOTHING` leaves a row with the wrong adapter unchanged. It must say `grok | grok | t`.
+   On a live project this applies migrations: back up first, and only with the owner's approval.
 
    **Instinct:** do not send it tasks until M3 is done and the email variables are loaded. `db/004_email.sql` already registers the row with the `email` adapter, and a task for an agent without an adapter waits and ends `failed` after 24 h.
+
+4. **Check:** `pnpm bridge:doctor`, with `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` set so it repeats the `PGRST106` check from step 2. Before the deployment, the dispatcher line can only say there is nothing overdue.
 
 5. **Create the Vercel project** from the repo, with the Hono preset. The entry file is `src/index.ts`, and `vercel.json` sets the region. Load `DATABASE_URL`, `BRIDGE_AGENT_KEYS` and `CRON_SECRET` (`openssl rand -hex 32`) for Production only.
 
@@ -79,6 +75,7 @@ Each step depends on the previous one. In particular, the Grok webhook goes last
 
    ```sh
    pnpm db:smoke   # {"wrote":true,"superseded":true,"found":true,"rolled_back":true}
+   pnpm bridge:doctor
    ```
 
 9. **Cron in Supabase.** In the SQL Editor, with the real values, and close that tab afterwards:
@@ -108,9 +105,9 @@ Each step depends on the previous one. In particular, the Grok webhook goes last
 ## Later deployments
 
 1. Backup, if the release has migrations.
-2. Migrate **before** deploying: migrations are additive, and the new code may need them.
+2. Migrate **before** deploying, with `pnpm bridge:setup` (or `pnpm db:migrate`): migrations are additive, and the new code may need them.
 3. `git push` to the production branch, or `vercel deploy --prod`.
-4. Repeat the checks from step 7 and `pnpm db:smoke`.
+4. Repeat the checks from step 7, `pnpm db:smoke` and `pnpm bridge:doctor`.
 
 Rules for new migrations: `db/NNN_name.sql`, no hand-written schema names, no `BEGIN` or `COMMIT`, and their own `GRANT`s to `bridge_app`.
 
@@ -139,7 +136,7 @@ This does not revert variables or migrations. Migrations only go forward: to und
 
 ## Restart or stop
 
-There is no process to restart. To stop everything:
+On Vercel there is no process to restart (self-host: `docker compose restart bridge`, see [`self-host.md`](self-host.md)). To stop everything:
 
 1. `SELECT cron.unschedule('bridge-dispatch');` stops the per-minute passes. To resume, run `db/cron_dispatch.sql` again.
 2. Settings > General > "Pause Project" in Vercel turns off the whole service, also for the agents.

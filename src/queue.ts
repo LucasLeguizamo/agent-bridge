@@ -1,4 +1,6 @@
 import type { Pool } from 'pg';
+import { raiseAlert } from './alert.ts';
+import { logTransition } from './log.ts';
 import { CLAIM_ADAPTERS, CLAIM_GRACE_SECONDS, type Json, type Task } from './tasks.ts';
 
 export const MAX_ATTEMPTS = 5;
@@ -53,74 +55,84 @@ export async function claim(pool: Pool, adapters: Adapters, limit = 10) {
 // `attempts = $2` fences stale acks: a slower attempt cannot overwrite a newer one.
 // On a claim adapter a 2xx only means a run may have started, so the task stays `submitted`, due again after the grace
 // period: the queue re-sends it inside MAX_ATTEMPTS until task_claim moves it to `working`. The wait doubles each time.
+// The event is written in a CTE and the task returned, so the stdout line comes from the committed row.
+// `woken`: a claim adapter started a run, and the task stays `submitted` until that run claims it.
 export async function ackDelivered(pool: Pool, t: Pick<Task, 'id' | 'attempts'> & { adapter?: string }) {
-  if (t.adapter && CLAIM_ADAPTERS.includes(t.adapter)) {
-    await pool.query(
-      `WITH up AS (
-         UPDATE task SET next_attempt_at = now() + make_interval(secs => $3)
-         WHERE id = $1 AND attempts = $2 AND state = 'submitted'
-         RETURNING id
-       )
-       INSERT INTO event (task_id, actor, type, payload)
-       SELECT id, 'bridge', 'delivered', jsonb_build_object('attempt', $2::int) FROM up`,
-      [t.id, t.attempts, CLAIM_GRACE_SECONDS * 2 ** (t.attempts - 1)],
-    );
-    return;
-  }
-  await pool.query(
+  const woken = Boolean(t.adapter && CLAIM_ADAPTERS.includes(t.adapter));
+  const { rows: [up] } = await pool.query<Task>(
     `WITH up AS (
-       UPDATE task SET state = 'working'
+       UPDATE task SET state = CASE WHEN $3::boolean THEN state ELSE 'working' END,
+         next_attempt_at = CASE WHEN $3::boolean THEN now() + make_interval(secs => $4) ELSE next_attempt_at END
        WHERE id = $1 AND attempts = $2 AND state = 'submitted'
-       RETURNING id
+       RETURNING *
+     ), ev AS (
+       INSERT INTO event (task_id, actor, type, payload)
+       SELECT id, 'bridge', 'delivered', jsonb_build_object('attempt', $2::int) FROM up
      )
-     INSERT INTO event (task_id, actor, type, payload)
-     SELECT id, 'bridge', 'delivered', jsonb_build_object('attempt', $2::int) FROM up`,
-    [t.id, t.attempts],
+     SELECT * FROM up`,
+    [t.id, t.attempts, woken, CLAIM_GRACE_SECONDS * 2 ** (t.attempts - 1)],
   );
+  if (up) logTransition(woken ? 'task.woken' : 'task.delivered', up);
 }
 
 export async function nackDelivery(pool: Pool, t: Pick<Task, 'id' | 'attempts'>, error: string) {
   const payload = JSON.stringify({ attempt: t.attempts, error: error.slice(0, 500) });
   if (t.attempts >= MAX_ATTEMPTS) {
-    await pool.query(
+    const { rows: [up] } = await pool.query<Task>(
       `WITH up AS (
          UPDATE task SET state = 'failed', output = '{"error":"delivery_exhausted"}'
          WHERE id = $1 AND attempts = $2 AND state = 'submitted'
-         RETURNING id
+         RETURNING *
+       ), ev AS (
+         INSERT INTO event (task_id, actor, type, payload)
+         SELECT id, 'bridge', 'alert', $3::jsonb || '{"alert":"delivery_exhausted"}' FROM up
        )
-       INSERT INTO event (task_id, actor, type, payload)
-       SELECT id, 'bridge', 'alert', $3::jsonb || '{"alert":"delivery_exhausted"}' FROM up`,
+       SELECT * FROM up`,
       [t.id, t.attempts, payload],
     );
+    if (up) failedAlert(up, 'delivery_exhausted');
     return;
   }
-  await pool.query(
+  const { rows: [up] } = await pool.query<Task>(
     `WITH up AS (
        UPDATE task SET next_attempt_at = now() + make_interval(secs => $3)
        WHERE id = $1 AND attempts = $2 AND state = 'submitted'
-       RETURNING id
+       RETURNING *
+     ), ev AS (
+       INSERT INTO event (task_id, actor, type, payload)
+       SELECT id, 'bridge', 'delivery_failed', $4::jsonb FROM up
      )
-     INSERT INTO event (task_id, actor, type, payload)
-     SELECT id, 'bridge', 'delivery_failed', $4::jsonb FROM up`,
+     SELECT * FROM up`,
     [t.id, t.attempts, BACKOFF_BASE_SECONDS * 2 ** (t.attempts - 1), payload],
   );
+  if (up) logTransition('task.retry', up);
+}
+
+/** The log line and the notice for a task the bridge itself failed. Keyed by pair, so a loop alerts once per window. */
+export function failedAlert(t: Task, alert: string) {
+  logTransition(alert === 'deadline_exceeded' ? 'task.expired' : 'task.failed', t, alert);
+  raiseAlert({ alert, key: `${t.from_agent}|${t.to_agent}`, task: t.id,
+    text: `${alert} on task ${t.id} (${t.from_agent} -> ${t.to_agent}, attempt ${t.attempts})` });
 }
 
 /** Fails overdue tasks, and tasks whose last allowed attempt crashed before it could report. */
 export async function sweep(pool: Pool) {
-  await pool.query(
+  const { rows } = await pool.query<Task>(
     `WITH up AS (
        UPDATE task SET state = 'failed', output = jsonb_build_object(
          'error', CASE WHEN deadline_at <= now() THEN 'deadline_exceeded' ELSE 'delivery_exhausted' END)
        WHERE state IN ('submitted', 'working', 'input_required')
          AND (deadline_at <= now()
               OR (state = 'submitted' AND attempts >= $1 AND next_attempt_at <= now()))
-       RETURNING id, output
+       RETURNING *
+     ), ev AS (
+       INSERT INTO event (task_id, actor, type, payload)
+       SELECT id, 'bridge', 'alert', jsonb_build_object('alert', output->>'error') FROM up
      )
-     INSERT INTO event (task_id, actor, type, payload)
-     SELECT id, 'bridge', 'alert', jsonb_build_object('alert', output->>'error') FROM up`,
+     SELECT * FROM up`,
     [MAX_ATTEMPTS],
   );
+  for (const t of rows) failedAlert(t, String(t.output?.error));
 }
 
 /** One dispatcher pass, whatever triggered it. Returns how many tasks it claimed. */

@@ -1,0 +1,71 @@
+# Self-host: Postgres and the bridge on one machine. Quick start in docs/self-host.md.
+# Reads .env, in this directory, for POSTGRES_PASSWORD and BRIDGE_DB_PASSWORD and for the bridge's own variables.
+name: agent-bridge
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: 10m, max-file: "3" } # Docker keeps every line otherwise, until the disk fills.
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bridge
+      # Read only when the volume is first created. Changing it later does not change the password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # TLS with the image's self-signed certificate, so the bridge keeps sslmode=require, as on Supabase.
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
+      - -c
+      - ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d bridge"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    logging: *logging
+
+  # One-shot: role, schema, migrations, role timeouts and agent rows. Safe to run on every start.
+  setup:
+    build: .
+    image: agent-bridge:local
+    restart: "no"
+    command: ["node", "db/setup.ts"]
+    env_file: .env
+    environment:
+      ADMIN_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/bridge?sslmode=require
+      DATABASE_CA_PEM: "" # The local certificate is self-signed: encrypted, not verified.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *logging
+
+  bridge:
+    build: .
+    image: agent-bridge:local
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://bridge_app:${BRIDGE_DB_PASSWORD:?set BRIDGE_DB_PASSWORD in .env}@postgres:5432/bridge?sslmode=require
+      DATABASE_CA_PEM: ""
+      DISPATCH_INTERVAL_MS: "60000" # Replaces pg_cron: the same pass as POST /cron/dispatch, once a minute.
+      # The app never holds the admin password.
+      POSTGRES_PASSWORD: ""
+      ADMIN_DATABASE_URL: ""
+    ports:
+      # Loopback only. Put a TLS proxy in front (docs/self-host.md); agents must reach it over https.
+      - "127.0.0.1:${BRIDGE_PORT:-3000}:3000"
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    logging: *logging
+
+volumes:
+  pgdata:
