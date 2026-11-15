@@ -16,7 +16,7 @@ jobs:
       # The runner's PostgreSQL ships with ssl=on and a self-signed cert; uselibpqcompat keeps `require` from verifying it.
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres?sslmode=require&uselibpqcompat=true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: pnpm/action-setup@v4
