@@ -11,6 +11,7 @@ import { EMAIL_ADAPTER, emailConfig } from '../src/email.ts';
 import { GROK_ADAPTER, grokConfig } from '../src/grok.ts';
 import { MAX_ATTEMPTS } from '../src/queue.ts';
 import { dispatchInterval } from '../src/standalone.ts';
+import { VERSION } from '../src/version.ts';
 
 type Env = Record<string, string | undefined>;
 export type Check = { name: string; status: 'ok' | 'fail' | 'warn' | 'skip'; detail: string; fix?: string };
@@ -213,6 +214,7 @@ export const failed = (checks: Check[]) => checks.some((c) => c.status === 'fail
 export const format = (c: Check) => `${MARK[c.status]} ${c.name}: ${c.detail}${c.fix ? `\n    fix: ${c.fix}` : ''}`;
 
 if (import.meta.main) {
+  console.log(`agent-bridge ${VERSION}`);
   const checks = await doctor(process.env);
   for (const c of checks) console.log(format(c));
   process.exitCode = failed(checks) ? 1 : 0;

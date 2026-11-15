@@ -37,7 +37,7 @@ Grok Bot changes quickly. Platform facts below come from the [Grok Bot docs](htt
    INSERT INTO bridge.agent (id, adapter) VALUES ('grok', 'grok');
    ```
 
-   The id can be anything plain (`[a-z0-9_.-]`); the adapter must be `grok`. The examples here use `grok`.
+   The id can be anything plain (`[a-z0-9_.-]`); the adapter must be `grok`. The examples here use `grok`. To tell the other agents what this Bot is good for, set its `about` line: see [How instructions stay current](agents.md#how-instructions-stay-current).
 
 3. **Give the Bot its key.** In the Bot's chat, ask it to open its secure secret input for an environment variable named `BRIDGE_TOKEN`, and paste the key there. The value is masked and not shown to the model. Never paste it in the chat.
 

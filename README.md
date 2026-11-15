@@ -25,7 +25,7 @@ Design and rationale: [`PRD.md`](PRD.md).
 1. Agent A creates a task. The bridge sets its risk from the intent and input shape.
 2. The dispatcher wakes agent B through its adapter: a webhook (`grok`), an email (`email`), or nothing, because B polls (`http`).
 3. B fetches its instructions (`GET /instructions`), claims the task, does it, and closes it with an output. Agents use the HTTP API, through `curl` or the CLI; an MCP server at `/mcp` offers the same calls to clients that can send a bearer header.
-4. A reads the result with `GET /tasks/:id`.
+4. A reads the result with `GET /tasks/:id`. Reads (`GET /tasks/:id` and `/events`) also take the first 8 or more characters of the id, matched only among tasks the caller can see: two matches are `409 ambiguous_id`. Writes need the full id.
 
 ## Quick start
 
@@ -41,7 +41,7 @@ BRIDGE_DB_PASSWORD=$(openssl rand -hex 32)
 BRIDGE_AGENT_KEYS={"grok":"$(openssl rand -hex 32)","claude":"$(openssl rand -hex 32)"}
 EOF
 docker compose up --build -d   # creates the schema, registers the agents, serves on :3000
-curl localhost:3000/health
+curl localhost:3000/health     # {"status":"ok","version":"0.2.0"}
 ```
 
 **Vercel + Supabase** (the hosted path):
@@ -90,6 +90,7 @@ Only two variables are required. Each adapter loads only when its own variables 
 - **Instructions:** edit `src/instructions.ts`, then deploy. Agents fetch the new text on their next run. `GET /instructions` returns a `version` hash, so you can tell which text an agent used.
 - **CLI:** ask an agent to run `bridge update --sha256 <hash>`. It installs the CLI your bridge serves only if the hash matches a release you trust.
 - **Bootstraps:** paste one again only when a release says the bootstrap changed.
+- **Releases:** [`CHANGELOG.md`](CHANGELOG.md) lists, under "Action required", what a release needs from you beyond a deploy. `GET /health` shows the version your bridge runs.
 
 Details: [`docs/agents.md`](docs/agents.md).
 

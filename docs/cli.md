@@ -37,6 +37,7 @@ bridge whoami
 bridge instructions
 bridge update
 bridge tasks pending [--limit n] [--cursor c] [--all]
+bridge tasks get <id>
 bridge tasks claim <id> [--dry-run] [--idempotency-key k]
 bridge tasks complete <id> --output-json '{...}' [--failed] [--dry-run] [--idempotency-key k]
 bridge tasks create --to a --intent i --input-json '{...}' --idempotency-key k [--parent id] [--dry-run]
@@ -45,6 +46,7 @@ bridge memory write <key> <value> [--dry-run] [--idempotency-key k]
 ```
 
 - `bridge instructions` prints this agent's current instructions from the bridge (`GET /instructions`).
+- `bridge tasks get <id>` reads a task this agent sent, or was offered (`GET /tasks/<id>`). The id may be the full UUID or its first 8 or more characters, in any case, such as the short id an agent gave the owner. It is matched only among this agent's own tasks; if two start the same way, it exits 1 with `ambiguous_id`: give more characters. The other task commands need the full UUID.
 - `bridge update --sha256 <hex>` re-downloads the CLI from the bridge it is configured for and installs it only if the hash matches. The hash is required.
 
 Every command accepts `--help` and `--help --json`. There are also `--version` and `--timeout-ms` (15,000 by default).
@@ -81,7 +83,7 @@ The text to give Instinct is on `/activate/instinct` of your deployment.
 
 | # | Point | How to check | Passes if | Fails if |
 |---|---|---|---|---|
-| 1 | **It installs and runs it** | Ask it to paste the output of `bridge --version` and `node --version` | It shows `{"version":"0.1.0"}` and Node 20 or higher, with the right hash | There is no Node and no way to install it, it cannot save files, or its network cannot reach the bridge (exit 6 at point 2) |
+| 1 | **It installs and runs it** | Ask it to paste the output of `bridge --version` and `node --version` | It shows `{"version":"X.Y.Z"}`, the same version as `GET /health` on your bridge, and Node 20 or higher, with the right hash | There is no Node and no way to install it, it cannot save files, or its network cannot reach the bridge (exit 6 at point 2) |
 | 2 | **It receives the credential safely** | Give it through the secrets channel of its computer, if there is one. Then ask for `bridge whoami` | It answers `{"agent":"..."}` with exit 0, and the key does not appear in the thread, in its replies or in its visible history | The only way is pasting it in a chat or email. **That is not acceptable for a real key:** what is sent to Instinct may stay in its service. To continue the test, use the disposable key, rotate it and record it as a failure |
 | 3 | **It keeps it between tasks** | In another session, at least a day later and giving it nothing new, ask for `bridge whoami` | Exit 0, with the CLI still installed | Exit 3 (it lost the key), or the command no longer exists |
 | 4 | **It uses it on its own when an email arrives** | Without intervening: a harmless `research` task, then the notice email. Then a notice with a made-up id | `task_claimed` and `task_completed` appear with that agent as actor, without you telling it anything. The made-up id ends in `claimed:false` and nothing more happens | It asks you to confirm a read task, replies on the thread instead of using the CLI, or acts on the made-up id |

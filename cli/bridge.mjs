@@ -68,6 +68,15 @@ const taskId = (raw) => {
   if (!UUID.test(raw)) throw usage('the task id must be a UUID');
   return raw.toLowerCase();
 };
+// Reads also take the start of an id, as agents show it to the owner: 8+ characters of the UUID, dashes in place.
+const taskRef = (raw) => {
+  const ref = raw.toLowerCase();
+  const shape = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx';
+  const ok = ref.length >= 8 && ref.length <= shape.length
+    && [...ref].every((c, i) => (shape[i] === '-' ? c === '-' : /[0-9a-f]/.test(c)));
+  if (!ok) throw usage('the task id must be a UUID, or its first 8 or more characters');
+  return ref;
+};
 const jsonObject = (flag, raw) => {
   if (raw === undefined) throw usage(`--${flag} is required`);
   let parsed;
@@ -121,10 +130,11 @@ const COMMANDS = [
     request: () => ({ method: 'GET', path: '/tasks/pending' }),
   },
   {
-    name: 'tasks get', summary: 'Show a task you sent or were offered: its state and, once closed, its output.',
+    name: 'tasks get', summary: 'Show a task you sent or were offered: its state and, once closed, its output. '
+      + 'The id may be its first 8 or more characters; if two of your tasks start that way, exit 1 with ambiguous_id.',
     args: ['id'], flags: [],
-    example: 'bridge tasks get 7b0f3c52-6a44-4d1e-9a51-0c7e5c0f1a22',
-    request: ([id]) => ({ method: 'GET', path: `/tasks/${taskId(id)}` }),
+    example: 'bridge tasks get 7b0f3c52',
+    request: ([id]) => ({ method: 'GET', path: `/tasks/${taskRef(id)}` }),
     view: (r) => {
       const t = taskOf(r);
       return {

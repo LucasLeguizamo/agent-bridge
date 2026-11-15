@@ -19,10 +19,12 @@ export async function smokeCheck(client: pg.ClientBase) {
 
   await client.query('BEGIN');
   try {
-    await client.query(`INSERT INTO agent (id, adapter) VALUES ('smoke', 'smoke')`);
-    const first = await memoryWrite(pool, 'smoke', { namespace: 'smoke', key: tag, value: `${tag} first` });
-    const second = await memoryWrite(pool, 'smoke', { namespace: 'smoke', key: tag, value: `${tag} second` });
-    const found = await memorySearch(pool, 'smoke', { query: tag, namespace: 'smoke' });
+    // bridge_app cannot write agent rows (006), so the writes go in the name of an agent that exists, and roll back.
+    const { rows: [agent] } = await client.query<{ id: string }>('SELECT id FROM agent WHERE enabled ORDER BY id LIMIT 1');
+    if (!agent) throw new Error('no enabled agent to write as: run pnpm bridge:setup first');
+    const first = await memoryWrite(pool, agent.id, { namespace: 'smoke', key: tag, value: `${tag} first` });
+    const second = await memoryWrite(pool, agent.id, { namespace: 'smoke', key: tag, value: `${tag} second` });
+    const found = await memorySearch(pool, agent.id, { query: tag, namespace: 'smoke' });
     await client.query('ROLLBACK');
     const { rows } = await client.query('SELECT 1 FROM fact WHERE key = $1', [tag]);
     return {

@@ -24,7 +24,7 @@ BRIDGE_AGENT_KEYS={"grok":"$(openssl rand -hex 32)","claude":"$(openssl rand -he
 EOF
 docker compose up --build -d
 docker compose logs setup     # one line per step: done, already done or skipped, and why
-curl -fsS http://127.0.0.1:3000/health   # {"status":"ok"}
+curl -fsS http://127.0.0.1:3000/health   # {"status":"ok","version":"0.2.0"}
 docker compose exec bridge node db/doctor.ts
 ```
 
@@ -112,7 +112,7 @@ The role comes first because the dump holds its grants. Its password is read fro
 |---|---|
 | Restart | `docker compose restart bridge` (it finishes the pass in progress, then exits) |
 | Stop everything | `docker compose down` (the data volume stays) |
-| Upgrade | back up, `git pull`, `docker compose up --build -d` (setup applies new migrations first) |
+| Upgrade | read "Action required" in `CHANGELOG.md`, back up, `git pull`, `docker compose up --build -d` (setup applies new migrations first). `/health` then shows the new version |
 | Pause one agent | `docker compose exec postgres psql -U postgres -d bridge -c "UPDATE bridge.agent SET enabled = false WHERE id = 'grok'"` |
 | Resume it | the same with `enabled = true` |
 | Rotate an agent key | change it in `BRIDGE_AGENT_KEYS`, `docker compose up -d`, then give the agent its new key |

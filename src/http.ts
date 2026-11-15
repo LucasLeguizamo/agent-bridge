@@ -13,7 +13,8 @@ import { logError } from './log.ts';
 import { ContextPackInput, contextPack, DATA_LABEL, memoryEvents, MemoryEventsInput, memoryHistory, MemoryHistoryInput, memoryLog, MemoryLogInput,
   memorySearch, MemorySearchInput, memoryWrite, MemoryWriteInput } from './memory.ts';
 import { jsonWithin, stripHiddenDeep } from './secrets.ts';
-import { BridgeError, cancelTask, createTask, finishTask, getEvents, getTask } from './tasks.ts';
+import { BridgeError, cancelTask, createTask, findTask, finishTask, getEvents } from './tasks.ts';
+import { VERSION } from './version.ts';
 
 const sha = (s: string) => createHash('sha256').update(s).digest();
 const HEALTH_CACHE_MS = 30_000;
@@ -75,14 +76,15 @@ export function createApp(pool: Pool, keys: Record<string, string>, options: App
 
   mountActivation(app);
 
-  // Before auth on purpose: the host probes it without a key, so it says only up or down.
+  // Before auth on purpose: the host probes it without a key, so it says only up or down, and which release is running.
+  // The version is public anyway: the project is open source. Add nothing else here.
   // Cached so a keyless flood cannot drain the pool or keep spending Hobby quota on queries.
   let health: { until: number; ok: Promise<boolean> } | undefined;
   app.get('/health', async (c) => {
     if (!health || Date.now() >= health.until) {
       health = { until: Date.now() + HEALTH_CACHE_MS, ok: pool.query('SELECT 1').then(() => true, () => false) };
     }
-    return await health.ok ? c.json({ status: 'ok' }) : c.json({ status: 'unavailable' }, 503);
+    return await health.ok ? c.json({ status: 'ok', version: VERSION }) : c.json({ status: 'unavailable' }, 503);
   });
 
   // Before auth: pg_cron is no agent, and an idle tick must not spend a query on an agent row.
@@ -130,10 +132,11 @@ export function createApp(pool: Pool, keys: Record<string, string>, options: App
 
   // The agent's working instructions, fetched at the start of every run: a deploy updates every agent at once.
   app.get('/instructions', async (c) => {
-    const { rows } = await pool.query<{ id: string; adapter: string }>('SELECT id, adapter FROM agent WHERE enabled ORDER BY id');
+    const { rows } = await pool.query<{ id: string; adapter: string; about: unknown }>(
+      `SELECT id, adapter, config->'about' AS about FROM agent WHERE enabled ORDER BY id`);
     const self = rows.find((r) => r.id === c.get('agent'));
     if (!self) return c.json({ error: 'agent_disabled' }, 403);
-    const others = rows.filter((r) => r !== self).map((r) => r.id);
+    const others = rows.filter((r) => r !== self).map(({ id, about }) => ({ id, about }));
     const text = fill(instructionsFor(self.adapter), new URL(c.req.url).origin, others);
     return c.json({ agent: self.id, version: versionOf(text), text });
   });
@@ -152,10 +155,11 @@ export function createApp(pool: Pool, keys: Record<string, string>, options: App
     data(c, await pendingTasks(pool, c.get('agent'), await parse(PendingInput, { json: async () => c.req.query() as unknown }))));
   // Same answer as the MCP tool, including for a malformed id: it is not run through idOf, which would answer 404.
   app.post('/tasks/:id/claim', async (c) => c.json(await claimReply(pool, c.req.param('id'), c.get('agent'))));
+  // Reads take a full id or a unique prefix of 8+ characters (findTask). Every write below needs the full id.
   app.get('/tasks/:id', async (c) =>
-    data(c, { task: await getTask(pool, idOf(c.req.param('id')), c.get('agent')) }));
+    data(c, { task: await findTask(pool, c.req.param('id'), c.get('agent')) }));
   app.get('/tasks/:id/events', async (c) =>
-    data(c, { events: await getEvents(pool, idOf(c.req.param('id')), c.get('agent')) }));
+    data(c, { events: await getEvents(pool, c.req.param('id'), c.get('agent')) }));
   app.post('/tasks/:id/complete', async (c) => {
     const { output } = await parse(OutputBody, c.req);
     return c.json({ task: await finishTask(pool, idOf(c.req.param('id')), c.get('agent'), 'completed', output) });

@@ -40,6 +40,9 @@ const SECRET_SHAPES = [
   /\bgithub_pat_\w{20,}/,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/,
   /\bxai-[A-Za-z0-9]{20,}/,
+  /\bwhsec_[A-Za-z0-9+/=_-]{16,}/, // Webhook signing secret
+  /\bre_[A-Za-z0-9_]{20,}/, // Resend key
+  /hooks\.slack\.com\/services\//i, // A Slack webhook URL is a secret
   /\bAIza[0-9A-Za-z_-]{30,}/,
   /\beyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{5,}/, // JWT
   /\bBearer\s+[\w.~+/-]{16,}/i,

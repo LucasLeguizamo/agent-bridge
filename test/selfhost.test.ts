@@ -14,6 +14,7 @@ import { dispatchInterval, startDispatcher } from '../src/standalone.ts';
 import { openTestSchema, testDatabaseUrl } from './pg.ts';
 
 const ROOT = new URL('..', import.meta.url);
+const PKG_VERSION = (JSON.parse(readFileSync(new URL('package.json', ROOT), 'utf8')) as { version: string }).version;
 const KEYS = { grok: 'g'.repeat(32), claude: 'c'.repeat(32) };
 type Run = { code: number | null; stdout: string; stderr: string };
 
@@ -124,6 +125,7 @@ describe('entry files', () => {
     assert.match(dockerfile, /^HEALTHCHECK .*\n.*\/health/m);
     assert.match(dockerfile, /CMD \["node", "src\/standalone\.ts"\]/);
     assert.match(dockerfile, /pnpm install --frozen-lockfile --prod/);
+    assert.match(dockerfile, /^COPY package\.json \.\/$/m, 'src/version.ts reads the version from it');
     assert.match(readFileSync(new URL('.dockerignore', ROOT), 'utf8'), /^\.env\*$/m);
     const pkg = JSON.parse(readFileSync(new URL('package.json', ROOT), 'utf8')) as { dependencies: Record<string, string> };
     assert.ok(pkg.dependencies['@hono/node-server'], 'a --prod install needs it');
@@ -134,6 +136,7 @@ describe('bridge:doctor without a database', () => {
   test('a missing variable is a failed check with a fix, and the exit code says so', async () => {
     const r = await run(['db/doctor.ts'], {}).done;
     assert.equal(r.code, 1, r.stderr);
+    assert.equal(r.stdout.split('\n')[0], `agent-bridge ${PKG_VERSION}`, 'the first line names the version');
     assert.match(r.stdout, /^✗ DATABASE_URL: not set\n {4}fix: /m);
     assert.match(r.stdout, /^✗ BRIDGE_AGENT_KEYS: not set/m);
     assert.match(r.stdout, /^! dispatcher trigger: neither DISPATCH_INTERVAL_MS nor CRON_SECRET is set/m);
@@ -237,7 +240,7 @@ describe('with a database', () => {
       await Promise.race([server.ready, server.done.then((r) => { throw new Error(`exited early: ${r.stderr}`); })]);
       const health = await fetch(`http://127.0.0.1:${port}/health`);
       assert.equal(health.status, 200);
-      assert.deepEqual(await health.json(), { status: 'ok' });
+      assert.deepEqual(await health.json(), { status: 'ok', version: PKG_VERSION });
 
       // No POST /cron/dispatch anywhere: only the timer can have sent it. http is pull-only, so delivered means working.
       let state = 'submitted';
@@ -315,8 +318,12 @@ describe('bridge:setup', () => {
       has_schema_privilege('public', 'bridge', 'USAGE') AS public_usage,
       has_table_privilege('bridge_app', 'bridge.task', 'SELECT') AS app_reads_task,
       has_table_privilege('bridge_app', 'bridge.event', 'UPDATE') AS app_updates_event,
-      has_column_privilege('bridge_app', 'bridge.fact', 'trust', 'UPDATE') AS app_sets_trust`);
-    assert.deepEqual(grants, { public_usage: false, app_reads_task: true, app_updates_event: false, app_sets_trust: false });
+      has_column_privilege('bridge_app', 'bridge.fact', 'trust', 'UPDATE') AS app_sets_trust,
+      has_table_privilege('bridge_app', 'bridge.agent', 'SELECT') AS app_reads_agent,
+      has_table_privilege('bridge_app', 'bridge.agent', 'INSERT') OR has_table_privilege('bridge_app', 'bridge.agent', 'UPDATE') AS app_writes_agent`);
+    assert.deepEqual(grants, {
+      public_usage: false, app_reads_task: true, app_updates_event: false, app_sets_trust: false, app_reads_agent: true, app_writes_agent: false,
+    });
 
     // A row someone changed by hand is reported, not overwritten.
     await client.query(`UPDATE bridge.agent SET adapter = 'http', enabled = false WHERE id = 'grok'`);

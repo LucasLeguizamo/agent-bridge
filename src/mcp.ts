@@ -7,6 +7,7 @@ import { NewTaskBody, TaskOutput } from './http.ts';
 import { logError } from './log.ts';
 import { DATA_LABEL, memorySearch, memoryWrite, MemorySearchInput, MemoryWriteInput, stripHidden, type Fact } from './memory.ts';
 import { BridgeError, createTask, finishTask } from './tasks.ts';
+import { VERSION } from './version.ts';
 
 const TaskComplete = z.strictObject({
   task_id: z.uuid().toLowerCase().describe('The task_id you claimed in this run.'),
@@ -50,7 +51,7 @@ async function completeTask(pool: Pool, agent: string, a: z.output<typeof TaskCo
 }
 
 function buildServer(pool: Pool, agent: string, kick: () => void) {
-  const server = new McpServer({ name: 'agent-bridge', version: '0.1.0' });
+  const server = new McpServer({ name: 'agent-bridge', version: VERSION });
 
   server.registerTool('task_claim', {
     description: 'Claim the task named by the webhook. Only the first claim gets the task. '

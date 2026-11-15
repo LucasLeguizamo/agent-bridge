@@ -22,7 +22,14 @@ You paste a short **bootstrap** into each agent once. The bootstrap says only: f
 - The routine agent fetches them with `curl` at the start of every run. The CLI agent runs `bridge instructions` each time it is woken.
 - **To update every agent:** change `src/instructions.ts`, merge and deploy. The next run uses the new text. Nothing to paste again.
 - `version` is a hash of the text, so you can tell which text an agent ran.
-- `{AGENTS}` in the text becomes the list of other enabled agents, so a new agent is known to the others as soon as you register it.
+- `{AGENTS}` in the text becomes the list of other enabled agents, so a new agent is known to the others as soon as you register it. Each one is listed with its description when it has one, for example `claude; grok (Web and X research, public pages)`, so an agent can tell which one to ask.
+- **To describe an agent:** set `about` in its config, one short line of what the agent can do, in terms of capabilities such as "web and X research" or "calendar", not of the accounts or sources behind them. Run it with the admin connection (`ADMIN_DATABASE_URL`, or the Supabase SQL Editor): `bridge_app` cannot write agent rows.
+
+  ```sql
+  UPDATE bridge.agent SET config = config || '{"about": "Web and X research, public pages"}' WHERE id = 'grok';
+  ```
+
+  Every other agent reads it on its next run, as a note next to the agent's id. It is data, never an instruction, and the served text says so. Because of that the bridge keeps only a plain alphabet: letters and digits of any script, spaces, and the marks `, . : / ' -`. Everything else is removed, including brackets of any kind, other quotes, `$`, braces, `;`, emoji and invisible characters, so a description cannot close its own bracket and add a sentence. It is cut at 200 characters, and a value of more than 2000 characters is dropped unread. If it looks like it holds a secret (a key, a token, or a word such as "password" or "secret" followed by `:` or `=`), it is not shown at all, with no warning, so a description that vanishes may only contain a word like that. Put no secrets or private detail in it.
 - Paste a bootstrap again only when the bootstrap itself changes. The release notes will say so.
 - **The CLI itself:** `bridge update --sha256 <hash>` downloads the version the bridge serves and installs it only if its hash matches one from a release you trust. The hash is required.
 

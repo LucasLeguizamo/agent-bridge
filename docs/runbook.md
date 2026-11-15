@@ -65,13 +65,13 @@ Each step depends on the previous one. In particular, the Grok webhook goes last
 7. **Deploy** and verify. `<url>` is the production domain:
 
    ```sh
-   curl -fsS https://<url>/health                                  # {"status":"ok"}
+   curl -fsS https://<url>/health                                  # {"status":"ok","version":"0.2.0"}
    curl -s -o /dev/null -w '%{http_code}\n' https://<url>/tasks/x  # 401
    curl -s -o /dev/null -w '%{http_code}\n' -X POST https://<url>/cron/dispatch  # 401
    curl -s -o /dev/null -w '%{http_code}\n' https://<url>/activate/grok  # 200
    ```
 
-8. **Smoke test as `bridge_app`.** `/health` and a 401 do not touch permissions; this does. It does one write, one replace and one search with the real code, through port 6543, in a transaction that always rolls back. With `DATABASE_URL` in `.env.local`:
+8. **Smoke test as `bridge_app`.** `/health` and a 401 do not touch permissions; this does. It does one write, one replace and one search with the real code, through port 6543, in a transaction that always rolls back. It writes in the name of the first enabled agent, because `bridge_app` cannot add agent rows, so run it after setup has registered one. With `DATABASE_URL` in `.env.local`:
 
    ```sh
    pnpm db:smoke   # {"wrote":true,"superseded":true,"found":true,"rolled_back":true}
@@ -107,7 +107,7 @@ Each step depends on the previous one. In particular, the Grok webhook goes last
 1. Backup, if the release has migrations.
 2. Migrate **before** deploying, with `pnpm bridge:setup` (or `pnpm db:migrate`): migrations are additive, and the new code may need them.
 3. `git push` to the production branch, or `vercel deploy --prod`.
-4. Repeat the checks from step 7, `pnpm db:smoke` and `pnpm bridge:doctor`.
+4. Repeat the checks from step 7, `pnpm db:smoke` and `pnpm bridge:doctor`. `/health` must show the new version.
 
 Rules for new migrations: `db/NNN_name.sql`, no hand-written schema names, no `BEGIN` or `COMMIT`, and their own `GRANT`s to `bridge_app`.
 

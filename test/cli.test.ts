@@ -427,6 +427,29 @@ describe('commands', () => {
     assert.equal(bridge.hits[0]!.url, `/tasks/${ID}/claim`);
   });
 
+  test('tasks get takes the short id an agent gave the owner; the writes still need the full id', async () => {
+    bridge.handler = (_, res) => json(res, 200, { data_label: 'data', task: { id: ID, state: 'working' } });
+    const short = await cli(['tasks', 'get', ID.slice(0, 8).toUpperCase()]);
+    assert.equal(short.code, 0);
+    assert.equal(short.json.task.id, ID);
+    assert.equal(bridge.hits[0]!.url, `/tasks/${ID.slice(0, 8)}`);
+    assert.equal((await cli(['tasks', 'get', ID])).code, 0);
+    assert.equal(bridge.hits[1]!.url, `/tasks/${ID}`);
+
+    for (const args of [['tasks', 'get', ID.slice(0, 7)], ['tasks', 'get', `${ID.slice(0, 8)}x`], ['tasks', 'get', '7b0f3c52/..'],
+      ['tasks', 'claim', ID.slice(0, 8)], ['tasks', 'complete', ID.slice(0, 8), '--output-json', '{}']]) {
+      const r = await cli(args);
+      assert.equal(r.code, 2, args.join(' '));
+      assertErrorShape(r, 'bad_usage', false);
+    }
+    assert.equal(bridge.hits.length, 2, 'nothing malformed was sent');
+
+    bridge.handler = (_, res) => json(res, 409, { error: 'ambiguous_id' });
+    const clash = await cli(['tasks', 'get', ID.slice(0, 8)]);
+    assert.equal(clash.code, 1);
+    assertErrorShape(clash, 'ambiguous_id', false);
+  });
+
   test('tasks complete and --failed reach their routes, and repeating gives the same result', async () => {
     bridge.handler = (req, res) => json(res, 200, { task: { id: ID, state: req.url!.endsWith('/fail') ? 'failed' : 'completed', input: { other: 'data' } } });
     const first = await cli(['tasks', 'complete', ID, '--output-json', '{"summary":"done"}']);

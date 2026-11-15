@@ -252,8 +252,42 @@ export async function getTask(pool: Pool, id: string, agent: string) {
   return t;
 }
 
-export async function getEvents(pool: Pool, id: string, agent: string) {
-  await getTask(pool, id, agent);
+// Agents show the owner the first 8 characters of a task id, so a read takes those too.
+export const MIN_ID_PREFIX = 8;
+const UUID_SHAPE = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx';
+
+/**
+ * The ids a full task id or a prefix of one can name, as an inclusive uuid range: the prefix padded with 0s and with fs.
+ * Canonical form only: hex, a dash exactly where a uuid has one, 8 characters or more, any case. Null for anything else.
+ */
+export function taskIdRange(raw: string) {
+  const ref = raw.toLowerCase();
+  if (ref.length < MIN_ID_PREFIX || ref.length > UUID_SHAPE.length) return null;
+  for (let i = 0; i < ref.length; i++) {
+    if (UUID_SHAPE[i] === '-' ? ref[i] !== '-' : !/[0-9a-f]/.test(ref[i]!)) return null;
+  }
+  const rest = UUID_SHAPE.slice(ref.length);
+  return { low: ref + rest.replaceAll('x', '0'), high: ref + rest.replaceAll('x', 'f') };
+}
+
+/**
+ * getTask for reads, by full id or unique prefix. The prefix is matched only among tasks this agent may already see,
+ * so a miss or a clash says nothing about anyone else's. A uuid range on the primary key: an index scan, not a LIKE.
+ */
+export async function findTask(pool: Pool, ref: string, agent: string) {
+  const range = taskIdRange(ref);
+  if (!range) throw new BridgeError(404, 'not_found');
+  const { rows } = await pool.query<Task>(
+    `SELECT * FROM task WHERE id BETWEEN $1::uuid AND $2::uuid
+       AND (from_agent = $3 OR (to_agent = $3 AND attempts > 0))
+     ORDER BY id LIMIT 2`, [range.low, range.high, agent]);
+  if (rows.length > 1) throw new BridgeError(409, 'ambiguous_id');
+  if (!rows[0]) throw new BridgeError(404, 'not_found');
+  return rows[0];
+}
+
+export async function getEvents(pool: Pool, ref: string, agent: string) {
+  const { id } = await findTask(pool, ref, agent);
   // Raw adapter errors can hold internal details: they stay in the audit log, out of the API.
   const { rows } = await pool.query(
     `SELECT id, task_id, actor, type, payload - 'error' AS payload, created_at
