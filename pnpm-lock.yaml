@@ -9,17 +9,17 @@ importers:
   .:
     dependencies:
       '@hono/node-server':
-        specifier: ^2.1.6
-        version: 2.1.6(hono@4.13.17)
+        specifier: ^2.1.8
+        version: 2.1.8(hono@4.13.18)
       '@modelcontextprotocol/server':
         specifier: 2.4.0
         version: 2.4.0
       '@vercel/functions':
-        specifier: ^3.11.0
-        version: 3.11.0
+        specifier: ^3.11.1
+        version: 3.11.1
       hono:
-        specifier: ^4.13.17
-        version: 4.13.17
+        specifier: ^4.13.18
+        version: 4.13.18
       pg:
         specifier: ^8.23.1
         version: 8.23.1
@@ -42,8 +42,8 @@ importers:
 
 packages:
 
-  '@hono/node-server@2.1.6':
-    resolution: {integrity: sha512-p/KH9MnfNcsm3sR6x4lNgm5j+QN4Et8srKredl9DZfXiyZ1UQ3aQ2YVpFLbqktYN5JI+DB+VZFKM2PqE5hLKjQ==}
+  '@hono/node-server@2.1.8':
+    resolution: {integrity: sha512-jdf7FHh6A1lzjpHHQUgxsg2GeER2vMetnAOfeActzcoli6jamlK+NAwL6Dsr5Fl3BS3tYUQzCdtZjU8Qxv7bEA==}
     engines: {node: '>=20'}
     peerDependencies:
       hono: ^4 || ^5.0.0-0
@@ -186,15 +186,15 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@vercel/cli-config@0.3.7':
-    resolution: {integrity: sha512-bHFJcUF2sUsB/6XfS+BWAYjD7DIt1xyhz6oOAvGEBua0S4P+pKQ04O6vZ3jLw1HMX1ZNKP9lyGpoiqgToqI7GQ==}
+  '@vercel/cli-config@0.3.8':
+    resolution: {integrity: sha512-C6av1p4tN+rHIcD0rdlsx3y9SaosRUU67dbgrjbLG8KdAK8oNVzfKg0ckV+1qWh5VC/Ft1BN3Pg/PuXSKNFVOA==}
 
   '@vercel/cli-exec@1.0.1':
     resolution: {integrity: sha512-g9XerViJ/paZujufXYcu5XYI2vU2rtB4sgdpjUHde5RnOkdmpu0ngH46LCFGHoPXO/C+qDPSczIHIRN+8Q2YKQ==}
     engines: {node: '>= 18'}
 
-  '@vercel/functions@3.11.0':
-    resolution: {integrity: sha512-LKwNcV4Jwb8GpovADePfassmsR2gRL5OeKcQzrWfLOJaRX3MHbeUPqAurCAneKrKa8hxnWa4H5bCFreLSvHedA==}
+  '@vercel/functions@3.11.1':
+    resolution: {integrity: sha512-tZoePP4TRh25G5VNsWuLanANvfq0wdbvoUdabhoc8UT2QxIXj6mfoqXE4ycOm6CZyZuAN9dHqU51vuijPXjTcg==}
     engines: {node: '>= 20'}
     peerDependencies:
       '@aws-sdk/credential-provider-web-identity': '*'
@@ -205,8 +205,8 @@ packages:
       ws:
         optional: true
 
-  '@vercel/oidc@4.0.7':
-    resolution: {integrity: sha512-ZiplzlXLWdKPj36yp23LBwaKWt4hR+kNULULeMVwtrx+iDpxnMk1nFKiHEtUWRjGpnqi/rDGwtnE/Xkfl9xXvQ==}
+  '@vercel/oidc@4.0.8':
+    resolution: {integrity: sha512-8wcmhuhrEsQlgTvPfRIeE4Y2geSaid0a1DP+um1PfNK4ETjqnfGTL5k5l7vS2T8A2gOx/MV7yNGxUJTs+0tqPQ==}
     engines: {node: '>= 20'}
 
   cross-spawn@7.0.6:
@@ -229,8 +229,8 @@ packages:
     resolution: {integrity: sha512-ts6Wi+2j3jQjqi70w5AlN8DFnkSwC+MqmxEzdEALB2qXZYV3X/b1CTfgPLGJNMeAWxdPfU8FO1ms3NUfaHCPYg==}
     engines: {node: '>=10'}
 
-  hono@4.13.17:
-    resolution: {integrity: sha512-vZIcbkvjOR5hHRWERbGkr8fGfF0GGM1ooYkuH448iO3b2AdVEr3AXZSw4Z3Kn+1L5z0CVoVeyV29VGYmFh05kQ==}
+  hono@4.13.18:
+    resolution: {integrity: sha512-H9q/E1XizaWstJxUW881dmLxEj+t/TrGGnyxINkm4+sK0qUwsMtFdo2BWI9Vs3cIS19MU6b6iCijoUoEf4f3DA==}
     engines: {node: '>=16.9.0'}
 
   human-signals@2.1.0:
@@ -376,9 +376,9 @@ packages:
 
 snapshots:
 
-  '@hono/node-server@2.1.6(hono@4.13.17)':
+  '@hono/node-server@2.1.8(hono@4.13.18)':
     dependencies:
-      hono: 4.13.17
+      hono: 4.13.18
 
   '@modelcontextprotocol/client@2.4.0':
     dependencies:
@@ -469,7 +469,7 @@ snapshots:
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
 
-  '@vercel/cli-config@0.3.7':
+  '@vercel/cli-config@0.3.8':
     dependencies:
       xdg-app-paths: 5.5.1
       zod: 4.6.7
@@ -478,13 +478,13 @@ snapshots:
     dependencies:
       execa: 5.1.1
 
-  '@vercel/functions@3.11.0':
+  '@vercel/functions@3.11.1':
     dependencies:
-      '@vercel/oidc': 4.0.7
+      '@vercel/oidc': 4.0.8
 
-  '@vercel/oidc@4.0.7':
+  '@vercel/oidc@4.0.8':
     dependencies:
-      '@vercel/cli-config': 0.3.7
+      '@vercel/cli-config': 0.3.8
       '@vercel/cli-exec': 1.0.1
       jose: 5.10.0
 
@@ -514,7 +514,7 @@ snapshots:
 
   get-stream@6.0.1: {}
 
-  hono@4.13.17: {}
+  hono@4.13.18: {}
 
   human-signals@2.1.0: {}
 
