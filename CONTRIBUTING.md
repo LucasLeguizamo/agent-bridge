@@ -71,8 +71,9 @@ These are product decisions, not style. PRs that break them will be closed:
 | `supabase`, `supabase-postgres-best-practices` | [`supabase/agent-skills`](https://github.com/supabase/agent-skills) |
 | `mcp-builder` | [`anthropics/skills`](https://github.com/anthropics/skills) |
 | `tdd`, `diagnosing-bugs` | [`mattpocock/skills`](https://github.com/mattpocock/skills) 1.3.1 |
+| `improve` | [`shadcn/improve`](https://github.com/shadcn/improve) 1.0.0 at `cac56e1` |
 
-For example: `npx skills add honojs/skills`. Read a skill before installing or updating it; agents load it as instructions. Personal rules go in `CLAUDE.local.md`, which git ignores.
+For example: `npx skills add honojs/skills`. `skills-lock.json` records the content hash of skills installed this way. `improve` is not preloaded by any agent: run it as `/improve` to audit the repo and write handoff plans. Read a skill before installing or updating it; agents load it as instructions. Personal rules go in `CLAUDE.local.md`, which git ignores.
 
 ## License
 
