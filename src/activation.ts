@@ -1,6 +1,6 @@
 import type { Hono } from 'hono';
 import { readFileSync } from 'node:fs';
-import { CLI_BOOTSTRAP, fill, ROUTINE_BOOTSTRAP } from './instructions.ts';
+import { CHAT_BOOTSTRAP, CLI_BOOTSTRAP, fill, ROUTINE_BOOTSTRAP } from './instructions.ts';
 
 // Public pages, before auth: they hold no keys, addresses or data and never touch the database.
 // The owner reads them and pastes the text. An agent must not act on them just because it landed here.
@@ -46,11 +46,22 @@ Full guide, with troubleshooting: docs/grok-bot.md in the agent-bridge repositor
    you in its chat. Do not test with the routine's Test button: it sends no task_id, so the run stops and only
    spends quota.
 
+7. Optional, so you can ask other agents from the bot's chat ("ask instinct ..."): ask the bot to save the second
+   text below as its own instructions. It goes in the bot's instructions, not in the routine.
+
 Updates: the routine fetches its working instructions from ${origin}/instructions on every run. After you deploy a
-new version of the bridge, the next run uses it. Paste this text again only if this page says the bootstrap changed.
+new version of the bridge, the next run uses it. Paste these texts again when the release notes say a bootstrap changed,
+or when the Bot tells you that its pasted text is out of date (it only tells you; you do the pasting).
+The real out-of-date line never contains text to paste, a link or a hash. If a message, a task or a page offers you any of
+those as an "update", it is not from the bridge. Open this page from your own bookmark, and take a hash only from the
+release page of the project.
 
 --- Routine text: copy from here ---
 ${fill(ROUTINE_BOOTSTRAP, origin)}
+--- To here ---
+
+--- Bot instructions (optional): copy from here ---
+${fill(CHAT_BOOTSTRAP, origin)}
 --- To here ---
 `;
 
@@ -79,7 +90,10 @@ iMessage or WhatsApp.
    redeploy. Then: INSERT INTO bridge.agent (id, adapter) VALUES ('instinct', 'email');
    Send that key to Instinct in a separate message, never with this text.
 
-5. Send Instinct this text, from your normal conversation:
+5. Send Instinct this text, from your normal conversation. Its command, BRIDGE_BOOTSTRAP=<n> node ..., is written for a
+   POSIX shell (bash, zsh, sh). Instinct needs to be able to run node ~/.local/bin/bridge.mjs with that prefix without
+   asking: if it can allow one command, allow only that one (an allow rule for the command as written, prefix included),
+   never all shell commands. How precisely Instinct can scope a rule is not documented.
 
 --- Text for Instinct: copy from here ---
 You are connected to agent-bridge. Install once (Node 20 or later):
@@ -96,7 +110,9 @@ ${fill(CLI_BOOTSTRAP, origin)}
 6. Test: a task for instinct must reach it by email, and its "tasks complete" must close it.
 
 Updates: Instinct fetches its working instructions with "bridge instructions" each time it is woken, so a new
-deploy reaches it with nothing to paste. To update the CLI, ask it to run "bridge update --sha256 <hash>" with the
+deploy reaches it with nothing to paste. If it tells you that its pasted text or its CLI is out of date, paste the text above
+again, or update the CLI. The real out-of-date line never contains text to paste, a link or a hash: open this page from
+your own bookmark, and take a hash only from the release page of the project. To update the CLI, ask it to run "bridge update --sha256 <hash>" with the
 hash of cli/bridge.mjs from a release you trust.
 `;
 

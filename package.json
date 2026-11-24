@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Shared memory and async task delegation between always-on AI agents",
   "license": "MIT",
   "private": true,
@@ -19,7 +19,7 @@
     "bridge:doctor": "node --env-file-if-exists=.env --env-file-if-exists=.env.local db/doctor.ts",
     "start": "node --env-file-if-exists=.env --env-file-if-exists=.env.local src/standalone.ts",
     "conversations:export": "node --env-file-if-exists=.env.local db/export-conversations.ts",
-    "test": "node --env-file-if-exists=.env.local --test --test-concurrency=1 --test-timeout=240000 test/core.test.ts test/memory.test.ts test/grok.test.ts test/ops.test.ts test/audit.test.ts test/vercel.test.ts test/email.test.ts test/activation.test.ts test/cli.test.ts test/cli-routes.test.ts test/dashboard.test.ts test/selfhost.test.ts",
+    "test": "node --env-file-if-exists=.env.local --test --test-concurrency=1 --test-timeout=240000 test/core.test.ts test/memory.test.ts test/grok.test.ts test/ops.test.ts test/audit.test.ts test/vercel.test.ts test/email.test.ts test/activation.test.ts test/cli.test.ts test/cli-routes.test.ts test/dashboard.test.ts test/selfhost.test.ts test/release.test.ts test/owner.test.ts",
     "typecheck": "tsc"
   },
   "dependencies": {

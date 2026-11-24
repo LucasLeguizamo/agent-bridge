@@ -19,7 +19,9 @@ END $$;
 
 ALTER ROLE bridge_app SET search_path = bridge;
 GRANT USAGE ON SCHEMA bridge TO bridge_app;
-GRANT SELECT, INSERT, UPDATE ON agent, task, fact, approval, pair_pause TO bridge_app;
+-- Read only: every agent's instructions are built from agent rows. An admin connection writes them (006 says why).
+GRANT SELECT ON agent TO bridge_app;
+GRANT SELECT, INSERT, UPDATE ON task, fact, approval, pair_pause TO bridge_app;
 GRANT DELETE ON pair_pause TO bridge_app;
 GRANT SELECT, INSERT ON event TO bridge_app;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA bridge TO bridge_app;

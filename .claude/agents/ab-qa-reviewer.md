@@ -6,6 +6,7 @@ description: >-
   finds gaps and flaky patterns, and recommends without writing code. Invoke
   before accepting a worker's result or merging a milestone.
 tools: Read, Grep, Glob, Bash
+model: sonnet
 skills:
   - tdd
 ---

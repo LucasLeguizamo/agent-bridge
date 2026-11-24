@@ -24,13 +24,13 @@ BRIDGE_AGENT_KEYS={"grok":"$(openssl rand -hex 32)","claude":"$(openssl rand -he
 EOF
 docker compose up --build -d
 docker compose logs setup     # one line per step: done, already done or skipped, and why
-curl -fsS http://127.0.0.1:3000/health   # {"status":"ok"}
+curl -fsS http://127.0.0.1:3000/health   # {"status":"ok","version":"0.3.0"}
 docker compose exec bridge node db/doctor.ts
 ```
 
 `.env` is ignored by git and never enters the image. The passwords must be hex: they go into connection URLs. Compose builds `DATABASE_URL` and the admin URL from them; do not set those two in `.env`.
 
-On every `docker compose up`, the one-shot `setup` service creates the `bridge_app` role and the `bridge` schema if missing, applies pending migrations, sets the role timeouts and registers every agent id in `BRIDGE_AGENT_KEYS`. Then the bridge starts. The adapter is inferred from the id (`grok` is `grok`, `instinct` is `email`, anything else is `http`), or set it with `BRIDGE_AGENT_ADAPTERS={"my-agent":"http"}`. Setup never changes an agent row that already exists; its line says so if the adapter differs.
+On every `docker compose up`, the one-shot `setup` service creates the `bridge_app` role and the `bridge` schema if missing, applies pending migrations, sets the role timeouts and registers every agent id in `BRIDGE_AGENT_KEYS`. Then the bridge starts. The adapter is inferred from the id (`grok` is `grok`, `instinct` is `email`, anything else is `http`), or set it with `BRIDGE_AGENT_ADAPTERS={"my-agent":"http"}`. `BRIDGE_AGENT_ABOUT={"my-agent":"one line"}` in the same `.env` sets each agent's description on every start (`docs/agents.md`). Setup never changes an agent row that already exists; its line says so if the adapter differs.
 
 The other variables (`GROK_WEBHOOK_URL`, the email variables, `DASHBOARD_TOKEN`) go in the same `.env`, as the README describes. `CRON_SECRET` is not needed here. After changing `.env`: `docker compose up -d`.
 
@@ -112,7 +112,7 @@ The role comes first because the dump holds its grants. Its password is read fro
 |---|---|
 | Restart | `docker compose restart bridge` (it finishes the pass in progress, then exits) |
 | Stop everything | `docker compose down` (the data volume stays) |
-| Upgrade | back up, `git pull`, `docker compose up --build -d` (setup applies new migrations first) |
+| Upgrade | read "Action required" in `CHANGELOG.md`, back up, `git pull`, `docker compose up --build -d` (setup applies new migrations first). `/health` then shows the new version |
 | Pause one agent | `docker compose exec postgres psql -U postgres -d bridge -c "UPDATE bridge.agent SET enabled = false WHERE id = 'grok'"` |
 | Resume it | the same with `enabled = true` |
 | Rotate an agent key | change it in `BRIDGE_AGENT_KEYS`, `docker compose up -d`, then give the agent its new key |

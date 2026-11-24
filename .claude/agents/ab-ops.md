@@ -7,6 +7,7 @@ description: >-
   debugging the running service. It prepares deployments but never executes one
   without the maintainer's approval.
 tools: Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch
+model: sonnet
 skills:
   - supabase
   - supabase-postgres-best-practices

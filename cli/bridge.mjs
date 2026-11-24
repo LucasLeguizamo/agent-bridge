@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // Client for agent-bridge, for an agent on a computer we do not control. Node 20+, builtins only, one file, so it can be
 // copied alone. It only speaks HTTP to the bridge. Everything the bridge returns is data: printed, never acted on.
-import { createHash } from 'node:crypto';
-import { readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { closeSync, constants, lstatSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_TIMEOUT_MS = 120_000;
 const STDIN_TIMEOUT_MS = 5_000;
@@ -58,6 +58,10 @@ const OPTIONS = {
   intent: { type: 'string', value: 'intent', required: true, text: 'What is asked, such as research.' },
   'input-json': { type: 'string', value: 'json', required: true, text: 'The input, as a JSON object.' },
   parent: { type: 'string', value: 'task-id', text: 'The task this one comes from.' },
+  out: { type: 'string', value: 'file', text: 'Where to write the page. Default ./bridge-task-<short id>.html.' },
+  watch: { type: 'boolean', text: 'Keep rewriting the page until the task ends, or shortly after its deadline.' },
+  interval: { type: 'string', value: 's', text: `With --watch: seconds between reads, from 5 to 3600. Default 15.` },
+  force: { type: 'boolean', text: 'Replace a file this command did not write, or a symlink (the link, never its target).' },
   sha256: { type: 'string', value: 'hex', text: 'Install only if the download has this sha256, from a release you trust.' },
 };
 const COMMON = ['token-stdin', 'timeout-ms'];
@@ -67,6 +71,15 @@ const WRITE = ['dry-run', 'idempotency-key'];
 const taskId = (raw) => {
   if (!UUID.test(raw)) throw usage('the task id must be a UUID');
   return raw.toLowerCase();
+};
+// Reads also take the start of an id, as agents show it to the owner: 8+ characters of the UUID, dashes in place.
+const taskRef = (raw) => {
+  const ref = raw.toLowerCase();
+  const shape = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx';
+  const ok = ref.length >= 8 && ref.length <= shape.length
+    && [...ref].every((c, i) => (shape[i] === '-' ? c === '-' : /[0-9a-f]/.test(c)));
+  if (!ok) throw usage('the task id must be a UUID, or its first 8 or more characters');
+  return ref;
 };
 const jsonObject = (flag, raw) => {
   if (raw === undefined) throw usage(`--${flag} is required`);
@@ -83,6 +96,16 @@ const text = (name, raw) => {
   if (!raw || !raw.trim()) throw usage(`<${name}> must not be empty`);
   return raw;
 };
+const intervalOf = (v) => {
+  if (v.interval === undefined) return 15;
+  if (!v.watch) throw usage('--interval needs --watch');
+  const n = Number(v.interval);
+  if (!Number.isInteger(n) || n < 5 || n > 3600) throw usage('--interval must be an integer from 5 to 3600');
+  return n;
+};
+// The bootstrap pasted by the owner runs "BRIDGE_BOOTSTRAP=<n> bridge instructions". A variable, not an option: a CLI from
+// before this ignores it, where an unknown option would stop it with exit 2. Anything but plain digits is dropped.
+const bootstrapOf = (env) => (/^(0|[1-9][0-9]{0,5})$/.test(env.BRIDGE_BOOTSTRAP ?? '') ? env.BRIDGE_BOOTSTRAP : undefined);
 const taskOf = (r) => {
   if (r.body?.task === null || typeof r.body?.task !== 'object') throw badResponse();
   return r.body.task;
@@ -94,7 +117,7 @@ const COMMANDS = [
     name: 'instructions', summary: 'Print this agent\'s current working instructions from the bridge. Follow its "text".',
     args: [], flags: [],
     example: 'bridge instructions',
-    request: () => ({ method: 'GET', path: '/instructions' }),
+    request: (_args, _values, env) => ({ method: 'GET', path: '/instructions', query: { bootstrap: bootstrapOf(env) } }),
   },
   {
     name: 'doctor', summary: 'Check this agent\'s setup: bridge URL, /health, token, agent enabled, instructions. '
@@ -115,22 +138,41 @@ const COMMANDS = [
     request: () => ({ method: 'GET', path: '/whoami' }),
   },
   {
+    name: 'agents', summary: 'List the other agents on this bridge: what each is for, and your own contact with it '
+      + '(tasks sent, received and still open, the last one, and whether the pair is paused).',
+    args: [], flags: [],
+    example: 'bridge agents',
+    request: () => ({ method: 'GET', path: '/agents' }),
+  },
+  {
     name: 'tasks pending', summary: 'List tasks offered to this agent and not claimed yet.', args: [], flags: READ_LIST,
     list: { key: 'tasks', maxLimit: 100, pages: true },
     example: 'bridge tasks pending --limit 20',
     request: () => ({ method: 'GET', path: '/tasks/pending' }),
   },
   {
-    name: 'tasks get', summary: 'Show a task you sent or were offered: its state and, once closed, its output.',
+    name: 'tasks get', summary: 'Show a task you sent or were offered: its state and, once closed, its output. '
+      + 'The id may be its first 8 or more characters; if two of your tasks start that way, exit 1 with ambiguous_id.',
     args: ['id'], flags: [],
-    example: 'bridge tasks get 7b0f3c52-6a44-4d1e-9a51-0c7e5c0f1a22',
-    request: ([id]) => ({ method: 'GET', path: `/tasks/${taskId(id)}` }),
+    example: 'bridge tasks get 7b0f3c52',
+    request: ([id]) => ({ method: 'GET', path: `/tasks/${taskRef(id)}` }),
     view: (r) => {
       const t = taskOf(r);
       return {
         data_label: r.body.data_label,
         task: { id: t.id, from_agent: t.from_agent, to_agent: t.to_agent, intent: t.intent, state: t.state, output: t.output, deadline_at: t.deadline_at },
       };
+    },
+  },
+  {
+    name: 'tasks view', summary: 'Write one HTML page that shows how a task you sent or were offered is going, and print '
+      + 'where it is. It holds task content: share it with care.',
+    args: ['id'], flags: ['out', 'watch', 'interval', 'force'], page: true,
+    example: 'bridge tasks view 7b0f3c52 --watch',
+    request: ([id], v) => {
+      if (v.out === '') throw usage('--out must not be empty');
+      intervalOf(v);
+      return { method: 'GET', path: `/tasks/${taskRef(id)}` };
     },
   },
   {
@@ -236,6 +278,7 @@ const helpOf = (cmd) => ({
 const ENVIRONMENT = {
   BRIDGE_URL: 'Base URL of the bridge. https is required; plain http only on loopback. Default: the file <config>/url.',
   BRIDGE_TOKEN: 'Bearer token. Or use --token-stdin. Never an argument. Default: the file <config>/token, mode 600.',
+  BRIDGE_BOOTSTRAP: 'Version of the pasted bootstrap, as its command writes it. Sent only by bridge instructions, so the bridge can tell an old paste.',
   XDG_CONFIG_HOME: 'Where <config> lives: $XDG_CONFIG_HOME/bridge, or ~/.config/bridge.',
 };
 const configDir = (env) => join(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config'), 'bridge');
@@ -509,6 +552,230 @@ async function runList(ctx, cmd, req, values) {
   return { ...first.body, [key]: items, ...(pages ? { next_cursor: null } : {}) };
 }
 
+// ---- tasks view: one HTML file with no script, no link and nothing to load. Every value in it was written by an agent
+// or by the server, so it goes through esc() or one of the helpers built on it.
+
+const SECOND_MS = 1000; // The watch's unit: tests run a copy of this file with a shorter one.
+const WATCH_GRACE_MS = 120 * SECOND_MS; // The bridge fails an overdue task on its next pass, a minute away at most.
+const LAST_READ_MS = 5 * SECOND_MS;
+const MAX_WATCH_MS = 48 * 3_600_000; // Whatever deadline a server claims.
+const MAX_FIELD = 200;
+const MAX_BLOCK = 20_000;
+const MAX_PAYLOAD = 1000;
+const MAX_EVENTS = 200;
+const PAGE_MARKER = '<!doctype html>\n<!-- agent-bridge: written by "bridge tasks view" -->\n';
+const STATES = { // sign, name, meaning
+  submitted: ['\u25cb', 'Submitted', 'queued or sent, not taken yet'],
+  working: ['\u25d0', 'Working', 'the agent has it'],
+  input_required: ['\u2016', 'Waiting', 'held until the owner approves it'],
+  completed: ['\u2713', 'Completed', 'closed with a result'],
+  failed: ['\u2717', 'Failed', 'closed without a result'],
+  canceled: ['\u2013', 'Canceled', 'withdrawn before it ended'],
+  rejected: ['\u2717', 'Rejected', 'refused, never done'],
+};
+const CLOSED = new Set(['completed', 'failed', 'canceled', 'rejected']);
+
+// What a reader could not see goes first, so that nothing hides a token from the scrubbing; tab and line feed stay.
+const visible = (s) => scrub(s.replace(/[^\P{C}\t\n]|\p{Default_Ignorable_Code_Point}/gu, ''));
+const ENTITIES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+const esc = (s) => s.replace(/[&<>"']/g, (c) => ENTITIES[c]);
+const cut = (s, max) => s.slice(0, max).replace(/[\ud800-\udbff]$/, ''); // Never half a surrogate pair.
+/** One short value. bdi keeps right-to-left text from reordering what is around it. */
+const field = (v) => {
+  const s = visible(typeof v === 'string' ? v : v === undefined ? '' : JSON.stringify(v));
+  return `<bdi>${esc(cut(s, MAX_FIELD))}${s.length > MAX_FIELD ? '\u2026' : ''}</bdi>`;
+};
+const block = (name, v, max) => {
+  const s = visible(JSON.stringify(v, null, 2));
+  const note = s.length > max ? `cut: the first ${max} of ${s.length} characters` : `${s.length} characters`;
+  return `<details>\n<summary>${name} (${note})</summary>\n<pre dir="auto">${esc(cut(s, max))}</pre>\n</details>`;
+};
+const timeOf = (v) => (typeof v === 'string' && /^\d{4}-\d\d-\d\dT/.test(v) ? Date.parse(v) : NaN);
+const moment = (v) => {
+  const ms = timeOf(v);
+  if (Number.isNaN(ms)) return field(v);
+  const iso = new Date(ms).toISOString();
+  return `<time datetime="${iso}">${iso.slice(0, 19).replace('T', ' ')} UTC</time>`;
+};
+const duration = (ms) => {
+  const min = Math.floor(ms / 60_000);
+  if (min < 1) return 'under 1 min';
+  if (min < 60) return `${min} min`;
+  return min < 2880 ? `${Math.floor(min / 60)} h ${min % 60} min` : `${Math.floor(min / 1440)} d`;
+};
+
+const PAGE_STYLE = `
+:root{color-scheme:light dark;--bg:#f7f7f8;--fg:#18181b;--muted:#52525b;--card:#fff;--line:#d4d4d8;--ok:#166534;--bad:#b91c1c;--warn:#92400e;--run:#1d4ed8}
+@media (prefers-color-scheme:dark){:root{--bg:#0b0b0e;--fg:#e4e4e7;--muted:#a1a1aa;--card:#16161a;--line:#3f3f46;--ok:#4ade80;--bad:#f87171;--warn:#fbbf24;--run:#60a5fa}}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;background:var(--bg);color:var(--fg)}
+header,main,footer{max-width:720px;margin:0 auto;padding:12px 16px}
+h1{font-size:1.4rem;margin:.4em 0 0}
+h2{font-size:1.05rem;margin:0 0 .5em}
+p{margin:.3em 0}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 14px}
+.state{font-weight:700;font-size:1.15rem}
+.completed{color:var(--ok)}.failed,.rejected,.late{color:var(--bad)}.input_required{color:var(--warn)}.working,.submitted{color:var(--run)}
+.muted,footer,dt,summary{color:var(--muted)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 16px;margin:0}
+dd{margin:0}
+dd,li,p,h1{overflow-wrap:anywhere}
+ol{margin:0;padding-left:1.4em}
+li{margin:0 0 .5em}
+summary{cursor:pointer;padding:4px 0}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;font:.85rem/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid var(--line);border-radius:6px;padding:8px;margin:4px 0}
+`;
+const PAGE_CSP = `default-src 'none'; style-src 'sha256-${createHash('sha256').update(PAGE_STYLE).digest('base64')}'; base-uri 'none'; form-action 'none'`;
+
+/** `refresh` is the seconds between reloads, or 0 for a page that will not change again. */
+function taskHtml({ task, events }, refresh) {
+  const id = task.id.slice(0, 8);
+  const [sign, name, meaning] = Object.hasOwn(STATES, task.state) ? STATES[task.state] : ['?', field(task.state), 'a state this CLI does not know'];
+  const left = timeOf(task.deadline_at) - Date.now();
+  const rows = [
+    ['Intent', field(task.intent)],
+    ['Risk', field(task.risk)],
+    ['Hop', field(task.hop)],
+    ['Attempts', field(task.attempts)],
+    ['Created', moment(task.created_at)],
+    ['Claimed', task.claimed_at == null ? 'Not claimed yet' : moment(task.claimed_at)],
+    ['Deadline', moment(task.deadline_at)],
+    ...(CLOSED.has(task.state) ? [] : [left < 0
+      ? ['Overdue by', `<strong class="late">${duration(-left)}</strong>`] : ['Time left', duration(left)]]),
+    ['Task id', esc(task.id)],
+  ];
+  const shown = events.slice(-MAX_EVENTS);
+  const hidden = events.length - shown.length;
+  const line = (e) => `<li>${moment(e?.created_at)} <strong>${field(e?.type)}</strong> <span class="muted">${field(e?.actor)}</span>${
+    e?.payload && typeof e.payload === 'object' && Object.keys(e.payload).length ? `\n${block('Details', e.payload, MAX_PAYLOAD)}` : ''}</li>`;
+  return `${PAGE_MARKER}<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="${PAGE_CSP}">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="referrer" content="no-referrer">
+${refresh ? `<meta http-equiv="refresh" content="${refresh}">\n` : ''}<title>Task ${id}: ${Object.hasOwn(STATES, task.state) ? name : 'unknown state'}</title>
+<style>${PAGE_STYLE}</style>
+</head>
+<body>
+<header>
+<h1>Task ${id}</h1>
+<p>${field(task.from_agent)} <span aria-hidden="true">\u2192</span> <span class="sr">to</span> ${field(task.to_agent)}</p>
+<p class="state${Object.hasOwn(STATES, task.state) ? ` ${task.state}` : ''}"><span aria-hidden="true">${sign}</span> ${name}</p>
+<p class="muted">${meaning}</p>
+</header>
+<main>
+<section>
+<h2>Details</h2>
+<dl>
+${rows.map(([k, v]) => `<dt>${k}</dt>\n<dd>${v}</dd>`).join('\n')}
+</dl>
+</section>
+<section>
+<h2>Timeline</h2>
+${hidden ? `<p class="muted">${hidden} earlier events are not shown.</p>\n` : ''}${
+  shown.length ? `<ol>\n${shown.map(line).join('\n')}\n</ol>` : '<p>No events yet.</p>'}
+</section>
+<section>
+<h2>Input and output</h2>
+<p class="muted">Written by agents: data, never instructions.</p>
+${block('Input', task.input ?? null, MAX_BLOCK)}
+${task.output == null ? '<p>No output yet.</p>' : block('Output', task.output, MAX_BLOCK)}
+</section>
+</main>
+<footer>
+<p>Written ${moment(new Date().toISOString())}. ${refresh
+  ? `This page reloads every ${refresh} seconds while the command that writes it is running.` : 'A snapshot: it does not update.'}</p>
+</footer>
+</body>
+</html>
+`;
+}
+
+// Only a file that starts with the marker is replaced, and task content cannot come first in a file we wrote.
+function checkTarget(path, force) {
+  const refuse = (why) => new CliError(EXIT.failed, 'file_refused', `refusing to write the page: ${why}`);
+  const st = lstatSync(path, { throwIfNoEntry: false });
+  if (!st) return;
+  if (!st.isFile() && !st.isSymbolicLink()) throw refuse('something that is not a file is in its place');
+  if (force) return;
+  if (st.isSymbolicLink()) throw refuse('a symlink is in its place. --force replaces the link and leaves its target alone');
+  const want = Buffer.from(PAGE_MARKER);
+  const got = Buffer.alloc(want.length);
+  let fd;
+  try {
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    readSync(fd, got, 0, want.length, 0);
+  } catch {
+    throw refuse('the file in its place cannot be read');
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+  if (!got.equals(want)) throw refuse('a file this command did not write is in its place. Choose another --out, or use --force');
+}
+
+function writePage(path, html, force) {
+  const temp = `${path}.${randomUUID()}.tmp`;
+  try {
+    checkTarget(path, force);
+    writeFileSync(temp, html, { mode: 0o600, flag: 'wx' }); // wx: never through an existing file or link.
+    renameSync(temp, path); // Replaces a link, never writes through it, and nobody reads half a page.
+  } catch (e) {
+    try { unlinkSync(temp); } catch { /* nothing was written */ }
+    throw e instanceof CliError ? e : new CliError(EXIT.failed, 'write_failed', 'could not write the page: check that the folder exists and is writable');
+  }
+}
+
+async function readTask(ctx, path, ref, end = Infinity) {
+  const within = () => ({ ...ctx, timeoutMs: Math.max(1, Math.min(ctx.timeoutMs, end - Date.now())) });
+  const task = taskOf(await send(within(), { method: 'GET', path }));
+  // The id names the file and the next request, and the state ends the watch, so neither is taken as it comes.
+  if (typeof task.id !== 'string' || !UUID.test(task.id) || !task.id.toLowerCase().startsWith(ref)
+    || typeof task.state !== 'string' || !SAFE_CODE.test(task.state) || Number.isNaN(timeOf(task.deadline_at))) throw badResponse();
+  task.id = task.id.toLowerCase();
+  // By full id: bridges up to 0.2.0 take no prefix.
+  const { body } = await send(within(), { method: 'GET', path: `/tasks/${task.id}/events` });
+  if (!Array.isArray(body.events)) throw badResponse();
+  return { task, events: body.events };
+}
+
+async function taskPage(ctx, ref, values) {
+  const every = intervalOf(values);
+  let snap = await readTask(ctx, `/tasks/${ref}`, ref);
+  const { id } = snap.task;
+  const file = resolve(values.out ?? `bridge-task-${id.slice(0, 8)}.html`);
+  // Fixed by the first read, so a server cannot keep this running by moving the deadline. The last read starts at `stop`
+  // and no request may outlast `end`, so one that never answers cannot either.
+  const end = Math.min(timeOf(snap.task.deadline_at) + WATCH_GRACE_MS, Date.now() + MAX_WATCH_MS);
+  const stop = end - LAST_READ_MS;
+  let force = Boolean(values.force);
+  for (;;) {
+    const closed = CLOSED.has(snap.task.state);
+    const last = !values.watch || closed || Date.now() >= stop;
+    writePage(file, taskHtml(snap, last ? 0 : every), force);
+    force = false; // From here on the file is ours.
+    if (last) {
+      if (values.watch && !closed) note('stopped watching: the task is past its deadline, or 48 hours went by, and it is still open');
+      return { file, state: snap.task.state };
+    }
+    for (let fresh; !fresh;) {
+      await new Promise((done) => { setTimeout(done, Math.min(every * SECOND_MS, Math.max(stop - Date.now(), 0))); });
+      try {
+        fresh = snap = await readTask(ctx, `/tasks/${id}`, id, end);
+      } catch (e) {
+        if (e instanceof CliError && e.retryable && Date.now() < stop) {
+          note(`${e.message}. Trying again in ${every} s`);
+          continue;
+        }
+        try { writePage(file, taskHtml(snap, 0), false); } catch { /* the first error is the one to report */ }
+        throw e;
+      }
+    }
+  }
+}
+
 // Each check is ours to word: what the server sends is only read for a status, an agent id or a version.
 async function doctor(values, env, timeoutMs) {
   const checks = [];
@@ -585,7 +852,7 @@ async function run(argv, env) {
   checkUse(cmd, args, values);
   const timeoutMs = timeoutOf(values);
   if (cmd.doctor) return doctor(values, env, timeoutMs);
-  const req = cmd.request(args, values);
+  const req = cmd.request(args, values, env);
   const key = values['idempotency-key'];
   // Only tasks create stores a key. The other writes are naturally repeatable; the header is there for a server that reads it.
   if (key !== undefined && req.body?.idempotency_key === undefined) req.headers = { 'idempotency-key': key };
@@ -605,6 +872,7 @@ async function run(argv, env) {
 
   if (cmd.local) return printJson(await selfUpdate(base, timeoutMs, values.sha256));
   const ctx = { base, timeoutMs, token: await loadToken(values, env) };
+  if (cmd.page) return printJson(await taskPage(ctx, taskRef(args[0]), values));
   if (cmd.list) return printJson(await runList(ctx, cmd, req, values));
   const result = await send(ctx, req);
   return printJson(cmd.view ? cmd.view(result) : result.body);

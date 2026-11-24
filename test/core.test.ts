@@ -452,6 +452,83 @@ describe('http boundary', () => {
   });
 });
 
+// Agents tell the owner the first 8 characters of a task id, and must be able to read the task back with them.
+describe('task id prefix', () => {
+  // Crafted ids, so two can share a prefix. attempts > 0 means offered: the receiver may see it.
+  const insert = (id: string, from: Agent, to: Agent, attempts = 1) => pool.query(
+    `INSERT INTO task (id, root_id, from_agent, to_agent, intent, input, risk, state, idempotency_key, attempts, deadline_at)
+     VALUES ($1, $1, $2, $3, 'research', '{}', 'read', 'submitted', $5, $4, now() + interval '1 hour')`, [id, from, to, attempts, `k-${id}`]);
+  const A = 'abcdef01-1111-4111-8111-111111111111';
+
+  test('an 8-character prefix reads the task for its sender', async () => {
+    await insert(A, 'grok', 'instinct');
+    const r = await call('grok', 'GET', '/tasks/abcdef01');
+    assert.equal(r.status, 200);
+    assert.equal(r.body.task.id, A);
+  });
+
+  test('the full id still reads it, and the receiver reads it by prefix once it was offered, not before', async () => {
+    await insert(A, 'grok', 'instinct', 0);
+    assert.equal((await call('grok', 'GET', `/tasks/${A}`)).body.task.id, A);
+    assert.equal((await call('instinct', 'GET', '/tasks/abcdef01')).status, 404, 'not offered yet: hidden, as by full id');
+    await pool.query('UPDATE task SET attempts = 1 WHERE id = $1', [A]);
+    const r = await call('instinct', 'GET', '/tasks/abcdef01');
+    assert.equal(r.status, 200);
+    assert.equal(r.body.task.id, A);
+  });
+
+  test('a prefix of another pair\'s task is the same 404 as an id that does not exist', async () => {
+    await insert(A, 'grok', 'instinct');
+    const theirs = await call('claude', 'GET', '/tasks/abcdef01');
+    const none = await call('claude', 'GET', '/tasks/01234567');
+    assert.deepEqual([theirs.status, theirs.body], [404, { error: 'not_found' }]);
+    assert.deepEqual([none.status, none.body], [404, { error: 'not_found' }]);
+    assert.equal((await call('claude', 'GET', '/tasks/abcdef01/events')).status, 404);
+  });
+
+  test('a prefix shorter than 8, or not in uuid form, is refused as today', async () => {
+    await insert(A, 'grok', 'instinct');
+    for (const ref of ['abcdef0', 'abcdef01-', 'abcdef011', 'abcdef01-1111-4111-8111-1111111111111', 'abcdef0g', 'abcdef0%',
+      'abcdef0_', ' abcdef01', 'abcdef01 ', 'abcdef01-11-1', '{abcdef01}']) {
+      // 'abcdef01-' is valid (the dash is where a uuid has one): it must find the task. The rest are malformed.
+      const expected = ref === 'abcdef01-' ? 200 : 404;
+      assert.equal((await call('grok', 'GET', `/tasks/${encodeURIComponent(ref)}`)).status, expected, ref);
+    }
+  });
+
+  test('two visible tasks under one prefix are a 409, a longer prefix picks one, and a task the caller cannot see never clashes', async () => {
+    const B = 'abcdef01-2222-4222-8222-222222222222';
+    await insert(A, 'grok', 'instinct');
+    await insert(B, 'claude', 'grok');
+    const both = await call('grok', 'GET', '/tasks/abcdef01');
+    assert.deepEqual([both.status, both.body], [409, { error: 'ambiguous_id' }]);
+    assert.equal((await call('grok', 'GET', '/tasks/abcdef01/events')).status, 409);
+    assert.equal((await call('grok', 'GET', '/tasks/abcdef01-2')).body.task.id, B);
+    // instinct sees only A; B belongs to another pair, so the short prefix is unique for it.
+    assert.equal((await call('instinct', 'GET', '/tasks/abcdef01')).body.task.id, A);
+  });
+
+  test('an uppercase prefix reads the task, and events follow the same rule', async () => {
+    const { body: { task } } = await create('grok');
+    const r = await call('grok', 'GET', `/tasks/${task.id.slice(0, 8).toUpperCase()}`);
+    assert.equal(r.body.task.id, task.id);
+    const ev = await call('grok', 'GET', `/tasks/${task.id.slice(0, 13).toUpperCase()}/events`);
+    assert.equal(ev.status, 200);
+    assert.ok(ev.body.events!.length >= 1);
+  });
+
+  test('writes still need the full id', async () => {
+    const { body: { task } } = await create('grok');
+    const short = task.id.slice(0, 8);
+    assert.equal((await call('grok', 'POST', `/tasks/${short}/cancel`)).status, 404);
+    await runOnce(pool, adapters);
+    assert.equal((await call('instinct', 'POST', `/tasks/${short}/complete`, { output: {} })).status, 404);
+    assert.equal((await call('instinct', 'POST', `/tasks/${short}/fail`, { output: {} })).status, 404);
+    assert.equal(((await call('instinct', 'POST', `/tasks/${short}/claim`)).body as unknown as { claimed: boolean }).claimed, false);
+    assert.equal((await call('grok', 'GET', `/tasks/${task.id}`)).body.task.state, 'working', 'nothing above changed it');
+  });
+});
+
 describe('audit fixes', () => {
   // Open bridge between agents (owner, 2026-11-07): extra text fields add nothing a free-text query cannot already say,
   // and the receiver treats both as data. A structured payload (object, list, number) still needs approval.

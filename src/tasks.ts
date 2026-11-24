@@ -252,12 +252,132 @@ export async function getTask(pool: Pool, id: string, agent: string) {
   return t;
 }
 
-export async function getEvents(pool: Pool, id: string, agent: string) {
-  await getTask(pool, id, agent);
-  // Raw adapter errors can hold internal details: they stay in the audit log, out of the API.
+// Agents show the owner the first 8 characters of a task id, so a read takes those too.
+export const MIN_ID_PREFIX = 8;
+const UUID_SHAPE = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx';
+
+/**
+ * The ids a full task id or a prefix of one can name, as an inclusive uuid range: the prefix padded with 0s and with fs.
+ * Canonical form only: hex, a dash exactly where a uuid has one, 8 characters or more, any case. Null for anything else.
+ */
+export function taskIdRange(raw: string) {
+  const ref = raw.toLowerCase();
+  if (ref.length < MIN_ID_PREFIX || ref.length > UUID_SHAPE.length) return null;
+  for (let i = 0; i < ref.length; i++) {
+    if (UUID_SHAPE[i] === '-' ? ref[i] !== '-' : !/[0-9a-f]/.test(ref[i]!)) return null;
+  }
+  const rest = UUID_SHAPE.slice(ref.length);
+  return { low: ref + rest.replaceAll('x', '0'), high: ref + rest.replaceAll('x', 'f') };
+}
+
+/**
+ * getTask for reads, by full id or unique prefix. The prefix is matched only among tasks this agent may already see,
+ * so a miss or a clash says nothing about anyone else's. A uuid range on the primary key: an index scan, not a LIKE.
+ */
+export async function findTask(pool: Pool, ref: string, agent: string) {
+  const range = taskIdRange(ref);
+  if (!range) throw new BridgeError(404, 'not_found');
+  const { rows } = await pool.query<Task>(
+    `SELECT * FROM task WHERE id BETWEEN $1::uuid AND $2::uuid
+       AND (from_agent = $3 OR (to_agent = $3 AND attempts > 0))
+     ORDER BY id LIMIT 2`, [range.low, range.high, agent]);
+  if (rows.length > 1) throw new BridgeError(409, 'ambiguous_id');
+  if (!rows[0]) throw new BridgeError(404, 'not_found');
+  return rows[0];
+}
+
+export const MAX_ANSWER_WAIT_SECONDS = 25;
+const ANSWER_POLL_MS = 2000;
+/** Said outside `task`, as claimReply does, when a held read returned an ended task it did not mark as seen. */
+export const UNCONFIRMED = 'Read once more without wait to confirm receipt';
+const OPEN_STATES: Task['state'][] = ['submitted', 'working', 'input_required'];
+export type Answer = Pick<Task, 'id' | 'to_agent' | 'intent' | 'state' | 'output' | 'deadline_at'>;
+
+/** Records that the asker has the result, so the bridge does not wake it for this task. */
+export const markSeen = (pool: Pool, id: string) =>
+  pool.query('UPDATE task SET asker_seen_at = now() WHERE id = $1 AND asker_seen_at IS NULL', [id]);
+
+/** A task as an agent gets it. The wake bookkeeping is the bridge's own: the receiver has no use for it. */
+export const taskView = <T extends object>(t: T) => {
+  const { asker_seen_at: _seen, asker_woken_at: _woken, ...rest } = t as T & { asker_seen_at?: unknown; asker_woken_at?: unknown };
+  return rest;
+};
+
+const MAX_ANSWER_CHARS = 8000;
+// What the served texts name, plus `text` (an email reply) and `summary` (the CLI's help example).
+const ANSWER_FIELDS = ['result', 'text', 'summary', 'reason', 'error', 'detail'];
+const CUT = '...[truncated]';
+
+/**
+ * What the asker reads of an output: all of it up to about 8000 characters serialized, as the result mail does. Beyond
+ * that, only the fields above are kept, each cut with a marker (the budget is split among those present), and
+ * `truncated: true` is added; `untrusted: true` stays if it was there. With none of those fields, the whole output is kept
+ * as a cut serialization under `result`, so an answer is never lost whole.
+ */
+export function capOutput(output: Json | null): Json | null {
+  if (output === null || JSON.stringify(output).length <= MAX_ANSWER_CHARS) return output;
+  let source: Record<string, unknown> = Array.isArray(output) ? { result: output } : output;
+  let kept = ANSWER_FIELDS.filter((k) => source[k] !== undefined);
+  if (!kept.length) {
+    source = { ...(source['untrusted'] === true ? { untrusted: true } : {}), result: JSON.stringify(output) };
+    kept = ['result'];
+  }
+  // Escapes make JSON longer than the text, so the share is halved until the whole fits.
+  for (let share = Math.floor((MAX_ANSWER_CHARS - 120) / kept.length); ; share = Math.floor(share / 2)) {
+    const out: Record<string, unknown> = source['untrusted'] === true ? { untrusted: true } : {};
+    for (const k of kept) {
+      const v = source[k];
+      const text = typeof v === 'string' ? v : JSON.stringify(v);
+      out[k] = text.length <= share ? v : `${text.slice(0, share)}${CUT}`;
+    }
+    out.truncated = true;
+    if (share < 16 || JSON.stringify(out).length <= MAX_ANSWER_CHARS + 200) return out;
+  }
+}
+
+/**
+ * What the asker of a task reads: its state and output, and nothing about anyone else's task. By full id or unique
+ * prefix, matched only among tasks this agent created. With `waitSeconds` it holds the request until the task ends or
+ * the time is up, so an agent that can only run curl can wait without a sleep command.
+ * Reading a task that has ended records that the asker saw it, except when the read was held and the task ended during
+ * the hold: the client may have gone away by then, and a serverless host does not always tell. That answer carries a
+ * top-level `next` that asks for one read without `wait`, and that one counts. The output is capped (capOutput).
+ * ponytail: polls every 2 s, one short query each, no connection held in between. LISTEN/NOTIFY if this ever shows up
+ * in query counts; it cannot go through the transaction pooler.
+ */
+export async function findAnswer(pool: Pool, ref: string, agent: string, waitSeconds = 0): Promise<{ task: Answer; next?: string }> {
+  const range = taskIdRange(ref);
+  if (!range) throw new BridgeError(404, 'not_found');
+  const until = Date.now() + waitSeconds * 1000;
+  for (let first = true; ; first = false) {
+    const { rows } = await pool.query<Answer>(
+      `SELECT id, to_agent, intent, state, output, deadline_at FROM task
+       WHERE id BETWEEN $1::uuid AND $2::uuid AND from_agent = $3
+       ORDER BY id LIMIT 2`, [range.low, range.high, agent]);
+    if (rows.length > 1) throw new BridgeError(409, 'ambiguous_id');
+    const [task] = rows;
+    if (!task) throw new BridgeError(404, 'not_found');
+    const out = { ...task, output: capOutput(task.output) };
+    if (!OPEN_STATES.includes(task.state)) {
+      if (first || waitSeconds === 0) {
+        await markSeen(pool, task.id);
+        return { task: out };
+      }
+      return { task: out, next: UNCONFIRMED };
+    }
+    if (Date.now() + ANSWER_POLL_MS > until) return { task: out };
+    await new Promise((resolve) => setTimeout(resolve, ANSWER_POLL_MS));
+  }
+}
+
+export async function getEvents(pool: Pool, ref: string, agent: string) {
+  const { id, from_agent } = await findTask(pool, ref, agent);
+  // Raw adapter errors can hold internal details: they stay in the audit log, out of the API. The wake-up trail
+  // (asker_*) is the asker's: the receiver has no use for it, and it could learn when its answer was read.
   const { rows } = await pool.query(
     `SELECT id, task_id, actor, type, payload - 'error' AS payload, created_at
-     FROM event WHERE task_id = $1 ORDER BY id`, [id]);
+     FROM event WHERE task_id = $1 AND ($2::boolean OR NOT starts_with(type, 'asker_')) ORDER BY id`,
+    [id, from_agent === agent]);
   return rows;
 }
 

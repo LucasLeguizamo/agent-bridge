@@ -7,6 +7,7 @@ description: >-
   double delivery, stuck tasks, budgets, or connection behavior through the
   Supabase pooler.
 tools: Read, Grep, Glob, Bash, Edit, Write
+model: opus
 skills:
   - supabase-postgres-best-practices
   - hono

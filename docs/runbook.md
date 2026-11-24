@@ -20,7 +20,7 @@ Names only. Values never go in the repo or in chat.
 | Vercel, **Production** only | `DATABASE_URL`, `BRIDGE_AGENT_KEYS`, `CRON_SECRET` |
 | Vercel, **Production** only, optional | `DATABASE_CA_PEM`, `GROK_WEBHOOK_URL`, `GROK_WEBHOOK_KEY`, `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_DOMAIN`, `EMAIL_TOKEN_SECRET`, `INSTINCT_EMAIL`, `OWNER_EMAIL`, `EMAIL_ALLOWED_SENDERS`, `DASHBOARD_TOKEN` |
 | Supabase Vault | `bridge_url`, `bridge_cron_secret` |
-| `.env.local` only, never in Vercel | `ADMIN_DATABASE_URL`, `BRIDGE_DB_PASSWORD`, `TEST_DATABASE_URL`, `BRIDGE_AGENT_ADAPTERS` (optional, for setup), `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` (optional, for doctor) |
+| `.env.local` only, never in Vercel | `ADMIN_DATABASE_URL`, `BRIDGE_DB_PASSWORD`, `TEST_DATABASE_URL`, `BRIDGE_AGENT_ADAPTERS` and `BRIDGE_AGENT_ABOUT` (optional, for setup and doctor), `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` (optional, for doctor) |
 
 Production only, on purpose: a preview without variables answers 500 instead of talking to the real database. Without both Grok variables, or without the six required email variables (`RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `EMAIL_DOMAIN`, `EMAIL_TOKEN_SECRET`, `INSTINCT_EMAIL`, `OWNER_EMAIL`), that adapter does not load and its tasks stay queued without spending attempts. `EMAIL_ALLOWED_SENDERS` is optional and defaults to `INSTINCT_EMAIL`. Changing a variable does not affect what is already deployed: redeploy.
 
@@ -50,7 +50,8 @@ Each step depends on the previous one. In particular, the Grok webhook goes last
    - creates the `bridge` schema with `001_core.sql` and its grants if missing (what `pnpm db:apply` does);
    - applies pending migrations, each in a transaction recorded in `bridge.schema_migration` (what `pnpm db:migrate` does);
    - sets the role timeouts if they are not set: `statement_timeout = '10s'` and `idle_in_transaction_session_timeout = '15s'`. A per-connection `statement_timeout` does not pass through the pooler in transaction mode, and without this the client's `query_timeout` does not stop the query on the server;
-   - registers every id in `BRIDGE_AGENT_KEYS` in `bridge.agent`. The adapter comes from `BRIDGE_AGENT_ADAPTERS` (`{"id":"grok|email|http"}`), or else `grok` is `grok`, `instinct` is `email` and anything else is `http`. An agent row that already exists is never changed: if its line says the adapter differs, fix it by hand. Without a row, an agent gets 403.
+   - registers every id in `BRIDGE_AGENT_KEYS` in `bridge.agent`. The adapter comes from `BRIDGE_AGENT_ADAPTERS` (`{"id":"grok|email|http"}`), or else `grok` is `grok`, `instinct` is `email` and anything else is `http`. An agent row that already exists is never changed: if its line says the adapter differs, fix it by hand. Without a row, an agent gets 403;
+   - sets the description (`config.about`) of the agents named in `BRIDGE_AGENT_ABOUT` (`{"id":"one line"}`, optional), and only that key of those agents. An id that is not named is left alone, and `""` removes the description. A value the filter would change or drop is refused before anything is written. Other agents read these lines in their instructions (`docs/agents.md`).
 
    On a live project this applies migrations: back up first, and only with the owner's approval.
 
@@ -58,20 +59,20 @@ Each step depends on the previous one. In particular, the Grok webhook goes last
 
 4. **Check:** `pnpm bridge:doctor`, with `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` set so it repeats the `PGRST106` check from step 2. Before the deployment, the dispatcher line can only say there is nothing overdue.
 
-5. **Create the Vercel project** from the repo, with the Hono preset. The entry file is `src/index.ts`, and `vercel.json` sets the region. Load `DATABASE_URL`, `BRIDGE_AGENT_KEYS` and `CRON_SECRET` (`openssl rand -hex 32`) for Production only.
+5. **Create the Vercel project** from the repo, with the Hono preset. The entry file is `src/index.ts`, and `vercel.json` sets the region and `maxDuration` (300 s, on `src/index.ts`, the one function the Hono preset builds from it; the Vercel docs show this key form for presets without an `api/` folder but do not name Hono, so check a preview deploy: a key that matches no function is ignored without an error, and 300 s is also the default with fluid compute, so only `vercel inspect <url> --json` shows whether it applied: look at the function's `timeout`). Load `DATABASE_URL`, `BRIDGE_AGENT_KEYS` and `CRON_SECRET` (`openssl rand -hex 32`) for Production only.
 
 6. **Deployment protection:** Settings > Deployment Protection > Vercel Authentication, with **Standard Protection** or "Only Preview Deployments" if shown. It must cover previews and leave the production domain open: `pg_net` and Grok Bot cannot sign in to Vercel. Never "All Deployments".
 
 7. **Deploy** and verify. `<url>` is the production domain:
 
    ```sh
-   curl -fsS https://<url>/health                                  # {"status":"ok"}
+   curl -fsS https://<url>/health                                  # {"status":"ok","version":"0.3.0"}
    curl -s -o /dev/null -w '%{http_code}\n' https://<url>/tasks/x  # 401
    curl -s -o /dev/null -w '%{http_code}\n' -X POST https://<url>/cron/dispatch  # 401
    curl -s -o /dev/null -w '%{http_code}\n' https://<url>/activate/grok  # 200
    ```
 
-8. **Smoke test as `bridge_app`.** `/health` and a 401 do not touch permissions; this does. It does one write, one replace and one search with the real code, through port 6543, in a transaction that always rolls back. With `DATABASE_URL` in `.env.local`:
+8. **Smoke test as `bridge_app`.** `/health` and a 401 do not touch permissions; this does. It does one write, one replace and one search with the real code, through port 6543, in a transaction that always rolls back. It writes in the name of the first enabled agent, because `bridge_app` cannot add agent rows, so run it after setup has registered one. With `DATABASE_URL` in `.env.local`:
 
    ```sh
    pnpm db:smoke   # {"wrote":true,"superseded":true,"found":true,"rolled_back":true}
@@ -106,8 +107,10 @@ Each step depends on the previous one. In particular, the Grok webhook goes last
 
 1. Backup, if the release has migrations.
 2. Migrate **before** deploying, with `pnpm bridge:setup` (or `pnpm db:migrate`): migrations are additive, and the new code may need them.
-3. `git push` to the production branch, or `vercel deploy --prod`.
-4. Repeat the checks from step 7, `pnpm db:smoke` and `pnpm bridge:doctor`.
+3. `git push` to the production branch, or `vercel deploy --prod`. The maintainer may instead connect the Vercel project to the repository, so a merge to `main` deploys by itself. Step 2 still comes first, by hand: merge only after the migrations of that release ran, because the new code can fail on the old schema. CI does not run them for you on purpose: that needs `ADMIN_DATABASE_URL`, which is never stored outside the owner's machine (not in GitHub, not in Vercel, not in a CI secret), and it also needs a backup and an approval first.
+4. Repeat the checks from step 7, `pnpm db:smoke` and `pnpm bridge:doctor`. `/health` must show the new version.
+
+`007_asker_wake.sql` must be applied before deploying this version: the code reads its new columns on `bridge.task`, and on the old schema `GET /tasks/:id/answer` answers `500`, and so does `GET /tasks/:id` as the asker of an ended task.
 
 Rules for new migrations: `db/NNN_name.sql`, no hand-written schema names, no `BEGIN` or `COMMIT`, and their own `GRANT`s to `bridge_app`.
 
