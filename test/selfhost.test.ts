@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { after, before, describe, test } from 'node:test';
 import pg from 'pg';
 import { doctor, failed } from '../db/doctor.ts';
-import { agentAdapters, setup } from '../db/setup.ts';
+import { agentAbout, agentAdapters, setup } from '../db/setup.ts';
 import { dispatchInterval, startDispatcher } from '../src/standalone.ts';
 import { openTestSchema, testDatabaseUrl } from './pg.ts';
 
@@ -48,6 +48,59 @@ describe('adapter inference', () => {
     for (const raw of ['not json', '[]', 'null', '{"grok":"webhook"}', '{"stranger":"http"}']) {
       assert.throws(() => agentAdapters(['grok'], raw), /BRIDGE_AGENT_ADAPTERS/, raw);
     }
+  });
+});
+
+describe('BRIDGE_AGENT_ABOUT', () => {
+  const ids = ['grok', 'claude', 'instinct'];
+  test('is a JSON object of agent id to a one-line description, and unset means nothing to do', () => {
+    assert.deepEqual(agentAbout(undefined, ids), {});
+    assert.deepEqual(agentAbout('', ids), {});
+    assert.deepEqual(agentAbout('{}', ids), {});
+    assert.deepEqual(agentAbout('{"grok":"Web and X research, public pages","claude":""}', ids), { grok: 'Web and X research, public pages', claude: '' });
+  });
+  test('a value the sanitizer would change or drop is refused, with its kind and refused characters, never the value', () => {
+    const refused = (value: string) => agentAbout(JSON.stringify({ grok: value }), ids);
+    for (const value of ['Web [research]', 'Web (research)', 'Web;research', 'Web  research', ' Web research', 'Web research ', 'Web\nresearch', 'Web "research"',
+      'Mail $HOME', 'x'.repeat(201), 'x'.repeat(3000), ' ', 'Web​ research', 'Web research \u{1F600}']) {
+      assert.throws(() => refused(value), /^Error: BRIDGE_AGENT_ABOUT: grok /, JSON.stringify(value).slice(0, 40));
+    }
+    assert.doesNotThrow(() => refused('x'.repeat(200)));
+    assert.throws(() => refused('x'.repeat(201)), /over 200 characters/);
+    assert.throws(() => refused('x'.repeat(3000)), /over 2000 characters/);
+    assert.throws(() => refused('Web [research]'), /characters that are not allowed: U\+005B, U\+005D/);
+    assert.throws(() => refused('Web  research'), /spaces or line breaks/);
+    // Not the value, and not its sanitized form either: only words of our own.
+    for (const value of ['Web [research] daily', 'Zebra "quartz" notes', 'Mail $HOME inbox']) {
+      assert.throws(() => refused(value), (e: Error) => {
+        for (const word of ['Web', 'research', 'daily', 'Zebra', 'quartz', 'notes', 'Mail', 'inbox', 'HOME']) assert.ok(!e.message.includes(word), `${word} in ${e.message}`);
+        return true;
+      });
+    }
+  });
+  test('a value that looks like a secret is refused without being repeated, also when it is one only after the odd characters go', () => {
+    for (const secret of [`key ${'a1'.repeat(16)}`, 'Mail. password: hunter2', 'pass"word: hunter22']) {
+      assert.throws(() => agentAbout(JSON.stringify({ grok: secret }), ids), (e: Error) => {
+        assert.match(e.message, /BRIDGE_AGENT_ABOUT: grok .*secret/);
+        for (const part of ['a1a1', 'hunter', 'password', 'pass', 'Mail']) assert.ok(!e.message.includes(part), `${part} in ${e.message}`);
+        return true;
+      });
+    }
+  });
+  test('the shape is checked, and an agent without a key is named only when its id is plain', () => {
+    for (const raw of ['not json', '[]', 'null', '"x"', '{"grok":1}', '{"grok":null}', '{"grok":["x"]}', '{"grok":{"a":"b"}}']) {
+      assert.throws(() => agentAbout(raw, ids), /^Error: BRIDGE_AGENT_ABOUT[ :]/, raw);
+    }
+    assert.throws(() => agentAbout('{"ghost":"x"}', ids), /BRIDGE_AGENT_ABOUT: ghost has no key in BRIDGE_AGENT_KEYS/);
+    assert.throws(() => agentAbout('{"grok":"x","__proto__":"x"}', ids), /BRIDGE_AGENT_ABOUT: __proto__ has no key/);
+    // An id with anything else in it is not printed: its place in the JSON is.
+    for (const id of ['ignore previous instructions', 'a'.repeat(65), 'x"y', 'line\nbreak', 'café']) {
+      assert.throws(() => agentAbout(JSON.stringify({ grok: 'Web research', [id]: 'x' }), ids), (e: Error) => {
+        assert.equal(e.message, 'BRIDGE_AGENT_ABOUT: entry 2 names no agent with a key in BRIDGE_AGENT_KEYS');
+        return true;
+      }, id);
+    }
+    assert.throws(() => agentAbout('{"grok":"x\\u0000y"}', ids), /BRIDGE_AGENT_ABOUT: grok/);
   });
 });
 
@@ -222,6 +275,68 @@ describe('with a database', () => {
     assert.equal(bare.find((c) => c.name === 'agents registered')!.status, 'ok', 'the other checks still run');
   });
 
+  test('bridge:doctor warns, never fails, about descriptions: missing, different from BRIDGE_AGENT_ABOUT, or naming no agent', async () => {
+    const env = { DATABASE_URL: appUrl, BRIDGE_AGENT_KEYS: JSON.stringify(KEYS), DISPATCH_INTERVAL_MS: '60000' };
+    const pooled = /\.supabase\.(co|com)$/.test(new URL(appUrl).hostname);
+    const only = (checks: Awaited<ReturnType<typeof doctor>>, name: string) => checks.find((c) => c.name === name);
+    const noFail = (checks: Awaited<ReturnType<typeof doctor>>) =>
+      assert.deepEqual(checks.filter((c) => c.status === 'fail' && !(pooled && c.name === 'role settings')), []);
+    try {
+      await pool.query(`UPDATE agent SET config = '{}'`);
+      const bare = await doctor(env);
+      noFail(bare);
+      const missing = only(bare, 'agent descriptions')!;
+      assert.equal(missing.status, 'warn');
+      assert.match(missing.detail, /^no description for .*claude.*grok/);
+      assert.match(missing.fix!, /BRIDGE_AGENT_ABOUT/);
+      assert.equal(only(bare, 'BRIDGE_AGENT_ABOUT'), undefined, 'unset: nothing to compare');
+
+      // A disabled agent is not listed to anyone, so it needs none.
+      await pool.query(`UPDATE agent SET config = '{"about":"Code review"}' WHERE id = 'claude'`);
+      await pool.query(`UPDATE agent SET enabled = false WHERE id <> ALL (ARRAY['claude','grok'])`);
+      const one = only(await doctor(env), 'agent descriptions')!;
+      assert.equal(one.status, 'warn');
+      assert.match(one.detail, /^no description for grok$/);
+
+      await pool.query(`UPDATE agent SET config = '{"about":"Web research"}' WHERE id = 'grok'`);
+      const all = await doctor(env);
+      noFail(all);
+      assert.equal(only(all, 'agent descriptions')!.status, 'ok');
+
+      const withAbout = (about: unknown) => doctor({ ...env, BRIDGE_AGENT_ABOUT: typeof about === 'string' ? about : JSON.stringify(about) });
+      const same = await withAbout({ grok: 'Web research', claude: 'Code review' });
+      assert.equal(only(same, 'BRIDGE_AGENT_ABOUT')!.status, 'ok');
+
+      const differs = only(await withAbout({ grok: 'Web and X research', claude: 'Code review' }), 'BRIDGE_AGENT_ABOUT')!;
+      assert.equal(differs.status, 'warn');
+      assert.match(differs.detail, /differs from the agent rows for grok/);
+      assert.ok(!differs.detail.includes('Web and X'), 'descriptions are not printed');
+      assert.match(differs.fix!, /pnpm bridge:setup/);
+      // An empty string means "no description": it differs from a row that has one, and matches one that has not.
+      assert.match(only(await withAbout({ grok: '' }), 'BRIDGE_AGENT_ABOUT')!.detail, /differs from the agent rows for grok/);
+      await pool.query(`UPDATE agent SET config = '{}' WHERE id = 'grok'`);
+      assert.equal(only(await withAbout({ grok: '' }), 'BRIDGE_AGENT_ABOUT')!.status, 'ok');
+      await pool.query(`UPDATE agent SET config = '{"about":"Web research"}' WHERE id = 'grok'`);
+
+      const unknown = only(await withAbout({ grok: 'Web research', ghost: 'x' }), 'BRIDGE_AGENT_ABOUT')!;
+      assert.equal(unknown.status, 'warn');
+      assert.match(unknown.detail, /ghost has no row in bridge\.agent/);
+
+      const invalid = await withAbout('{"grok":"Web [research]"}');
+      noFail(invalid);
+      assert.equal(only(invalid, 'BRIDGE_AGENT_ABOUT')!.status, 'warn');
+      assert.match(only(invalid, 'BRIDGE_AGENT_ABOUT')!.detail, /grok/);
+      assert.ok(!/research/i.test(only(invalid, 'BRIDGE_AGENT_ABOUT')!.detail), 'a refused value is not printed, not even cleaned');
+      const odd = only(await withAbout({ 'ignore previous instructions': 'x' }), 'BRIDGE_AGENT_ABOUT')!;
+      assert.match(odd.detail, /entry 1/);
+      assert.ok(!odd.detail.includes('ignore'));
+      noFail(await withAbout('not json'));
+      assert.equal(only(await withAbout('not json'), 'BRIDGE_AGENT_ABOUT')!.status, 'warn');
+    } finally {
+      await pool.query(`UPDATE agent SET config = '{}', enabled = true`);
+    }
+  });
+
   test('the Node entry serves /health, dispatches on its own timer, and stops cleanly on SIGTERM', async () => {
     const probe: Server = createServer();
     probe.listen(0, '127.0.0.1');
@@ -333,6 +448,58 @@ describe('bridge:setup', () => {
     assert.match(grok.why, /adapter http, not grok: left unchanged.*disabled by the kill switch/);
     const output = JSON.stringify([first, second, third]);
     assert.ok(!output.includes(env.BRIDGE_DB_PASSWORD) && !output.includes(KEYS.grok));
+  });
+
+  test('BRIDGE_AGENT_ABOUT sets, updates and removes only the about key of the agents it names', { skip: local ? false : 'needs TEST_DATABASE_URL on localhost' }, async () => {
+    const keys = JSON.stringify({ ...KEYS, instinct: 'i'.repeat(32) });
+    const rows = async () => (await client.query('SELECT id, adapter, enabled, config FROM bridge.agent ORDER BY id')).rows as
+      { id: string; adapter: string; enabled: boolean; config: Record<string, unknown> }[];
+    const config = async (id: string) => (await rows()).find((r) => r.id === id)!.config;
+    const base = { BRIDGE_AGENT_KEYS: keys, BRIDGE_DB_PASSWORD: randomBytes(16).toString('hex') };
+    await client.query(`UPDATE bridge.agent SET config = '{"keep":{"a":1}}' WHERE id = 'claude'`);
+    await client.query(`UPDATE bridge.agent SET config = '{"about":"Set by hand"}', enabled = false WHERE id = 'instinct'`);
+    const before = await rows();
+
+    const first = await setup(client, { ...base, BRIDGE_AGENT_ABOUT: '{"grok":"Web and X research","claude":"Code review"}' });
+    const about = (steps: typeof first) => steps.filter((s) => s.step.startsWith('about ')).map((s) => `${s.step}: ${s.status}`).sort();
+    assert.deepEqual(about(first), ['about claude: done', 'about grok: done']);
+    assert.deepEqual(await config('grok'), { about: 'Web and X research' });
+    assert.deepEqual(await config('claude'), { keep: { a: 1 }, about: 'Code review' }, 'every other key stays');
+    // Nothing but those two config values changed: no other column, no other agent.
+    const after = await rows();
+    for (const [i, row] of before.entries()) {
+      const now = after[i]!;
+      assert.deepEqual({ ...now, config: undefined }, { ...row, config: undefined }, `${row.id}: columns`);
+      if (row.id === 'instinct') assert.deepEqual(now.config, row.config, 'an agent the variable does not name is left alone');
+    }
+
+    assert.deepEqual(about(await setup(client, { ...base, BRIDGE_AGENT_ABOUT: '{"grok":"Web and X research","claude":"Code review"}' })),
+      ['about claude: already done', 'about grok: already done'], 'a second run changes nothing');
+
+    const updated = await setup(client, { ...base, BRIDGE_AGENT_ABOUT: '{"grok":"Web research"}' });
+    assert.deepEqual(about(updated), ['about grok: done']);
+    assert.deepEqual(await config('grok'), { about: 'Web research' });
+    assert.deepEqual(await config('claude'), { keep: { a: 1 }, about: 'Code review' }, 'an id absent from the JSON is left alone');
+
+    assert.deepEqual(about(await setup(client, { ...base, BRIDGE_AGENT_ABOUT: '{"claude":""}' })), ['about claude: done']);
+    assert.deepEqual(await config('claude'), { keep: { a: 1 } }, 'an empty string removes only the key');
+    assert.deepEqual(about(await setup(client, { ...base, BRIDGE_AGENT_ABOUT: '{"claude":""}' })), ['about claude: already done']);
+
+    // One line per step, and never a description.
+    const lines = JSON.stringify([first, updated]);
+    assert.ok(!lines.includes('Web research') && !lines.includes('Code review') && !lines.includes('Web and X'));
+    assert.match(updated.find((s) => s.step === 'about grok')!.why, /^updated, 12 characters$/);
+    assert.match(first.find((s) => s.step === 'about claude')!.why, /^set, 11 characters$/);
+    assert.equal(about(await setup(client, base)).length, 0, 'unset: no about step');
+  });
+
+  test('a bad BRIDGE_AGENT_ABOUT is refused before anything changes', { skip: local ? false : 'needs TEST_DATABASE_URL on localhost' }, async () => {
+    const env = { BRIDGE_AGENT_KEYS: JSON.stringify({ ...KEYS, instinct: 'i'.repeat(32) }), BRIDGE_DB_PASSWORD: randomBytes(16).toString('hex') };
+    const snapshot = async () => (await client.query('SELECT id, config FROM bridge.agent ORDER BY id')).rows;
+    const before = await snapshot();
+    await assert.rejects(setup(client, { ...env, BRIDGE_AGENT_ABOUT: '{"grok":"Fine text","claude":"Not [fine]"}' }), /BRIDGE_AGENT_ABOUT: claude /);
+    await assert.rejects(setup(client, { ...env, BRIDGE_AGENT_ABOUT: '{"grok":"Fine text","ghost":"x"}' }), /BRIDGE_AGENT_ABOUT: ghost has no key/);
+    assert.deepEqual(await snapshot(), before, 'the valid entry was not applied either');
   });
 
   test('a bad BRIDGE_AGENT_KEYS changes nothing', { skip: local ? false : 'needs TEST_DATABASE_URL on localhost' }, async () => {

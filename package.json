@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Shared memory and async task delegation between always-on AI agents",
   "license": "MIT",
   "private": true,

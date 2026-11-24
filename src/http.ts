@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { mountActivation } from './activation.ts';
 import { agentDirectory } from './agents.ts';
 import { mountDashboard } from './dashboard.ts';
-import { fill, instructionsFor, versionOf } from './instructions.ts';
+import { bootstrapVersionOf, fill, instructionsFor, staleNotice, versionOf } from './instructions.ts';
 import { claimReply, pendingTasks, PendingInput } from './claim.ts';
 import { logError } from './log.ts';
 import { ContextPackInput, contextPack, DATA_LABEL, memoryEvents, MemoryEventsInput, memoryHistory, MemoryHistoryInput, memoryLog, MemoryLogInput,
@@ -144,7 +144,10 @@ export function createApp(pool: Pool, keys: Record<string, string>, options: App
     const source = instructionsFor(self.adapter, mode);
     if (!source) throw new BridgeError(404, 'not_found');
     const text = fill(source, new URL(c.req.url).origin, others);
-    return c.json({ agent: self.id, version: versionOf(text), text });
+    // The version is of the text alone: the line is a per request fact, so a stale and a current agent report the same one.
+    // What the agent sent (a number, its user agent) picks a fixed line and is never copied into the text.
+    const notice = staleNotice(self.adapter, { bootstrap: bootstrapVersionOf(c.req.query('bootstrap')), userAgent: c.req.header('user-agent') });
+    return c.json({ agent: self.id, version: versionOf(text), text: text + notice });
   });
 
   app.post('/tasks', async (c) => {

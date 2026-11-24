@@ -41,7 +41,7 @@ BRIDGE_DB_PASSWORD=$(openssl rand -hex 32)
 BRIDGE_AGENT_KEYS={"grok":"$(openssl rand -hex 32)","claude":"$(openssl rand -hex 32)"}
 EOF
 docker compose up --build -d   # creates the schema, registers the agents, serves on :3000
-curl localhost:3000/health     # {"status":"ok","version":"0.2.0"}
+curl localhost:3000/health     # {"status":"ok","version":"0.3.0"}
 ```
 
 **Vercel + Supabase** (the hosted path):
@@ -81,6 +81,7 @@ Only two variables are required. Each adapter loads only when its own variables 
 | `DISPATCH_INTERVAL_MS` | self-host | Runs the dispatcher in the process every N ms (compose: 60000), instead of pg_cron |
 | `PORT`, `HOST` | self-host | Default `3000`, `127.0.0.1` (the Docker image sets `0.0.0.0`) |
 | `BRIDGE_AGENT_ADAPTERS` | no | `{"agent-id": "grok\|email\|http"}`, read by `bridge:setup` |
+| `BRIDGE_AGENT_ABOUT` | no | `{"agent-id": "one line"}`: what each agent is for. `bridge:setup` sets it, `bridge:doctor` compares it. See [`docs/agents.md`](docs/agents.md) |
 | `POSTGRES_PASSWORD`, `BRIDGE_DB_PASSWORD`, `BRIDGE_PORT` | compose | Database passwords and published port |
 | `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` | no | Let `bridge:doctor` confirm the schema is not exposed by the Data API |
 | `EMAIL_ALLOWED_SENDERS`, `DATABASE_CA_PEM` | no | Defaults: `INSTINCT_EMAIL`; TLS encrypted but not verified |
@@ -89,7 +90,7 @@ Only two variables are required. Each adapter loads only when its own variables 
 
 - **Instructions:** edit `src/instructions.ts`, then deploy. Agents fetch the new text on their next run. `GET /instructions` returns a `version` hash, so you can tell which text an agent used.
 - **CLI:** ask an agent to run `bridge update --sha256 <hash>`. It installs the CLI your bridge serves only if the hash matches a release you trust.
-- **Bootstraps:** paste one again only when a release says the bootstrap changed.
+- **Bootstraps:** paste one again only when a release says the bootstrap changed. An agent with an old paste also tells you so itself, and only tells you.
 - **Releases:** [`CHANGELOG.md`](CHANGELOG.md) lists, under "Action required", what a release needs from you beyond a deploy. `GET /health` shows the version your bridge runs.
 
 Details: [`docs/agents.md`](docs/agents.md).

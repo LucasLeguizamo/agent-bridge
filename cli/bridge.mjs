@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_TIMEOUT_MS = 120_000;
 const STDIN_TIMEOUT_MS = 5_000;
@@ -103,6 +103,9 @@ const intervalOf = (v) => {
   if (!Number.isInteger(n) || n < 5 || n > 3600) throw usage('--interval must be an integer from 5 to 3600');
   return n;
 };
+// The bootstrap pasted by the owner runs "BRIDGE_BOOTSTRAP=<n> bridge instructions". A variable, not an option: a CLI from
+// before this ignores it, where an unknown option would stop it with exit 2. Anything but plain digits is dropped.
+const bootstrapOf = (env) => (/^(0|[1-9][0-9]{0,5})$/.test(env.BRIDGE_BOOTSTRAP ?? '') ? env.BRIDGE_BOOTSTRAP : undefined);
 const taskOf = (r) => {
   if (r.body?.task === null || typeof r.body?.task !== 'object') throw badResponse();
   return r.body.task;
@@ -114,7 +117,7 @@ const COMMANDS = [
     name: 'instructions', summary: 'Print this agent\'s current working instructions from the bridge. Follow its "text".',
     args: [], flags: [],
     example: 'bridge instructions',
-    request: () => ({ method: 'GET', path: '/instructions' }),
+    request: (_args, _values, env) => ({ method: 'GET', path: '/instructions', query: { bootstrap: bootstrapOf(env) } }),
   },
   {
     name: 'doctor', summary: 'Check this agent\'s setup: bridge URL, /health, token, agent enabled, instructions. '
@@ -275,6 +278,7 @@ const helpOf = (cmd) => ({
 const ENVIRONMENT = {
   BRIDGE_URL: 'Base URL of the bridge. https is required; plain http only on loopback. Default: the file <config>/url.',
   BRIDGE_TOKEN: 'Bearer token. Or use --token-stdin. Never an argument. Default: the file <config>/token, mode 600.',
+  BRIDGE_BOOTSTRAP: 'Version of the pasted bootstrap, as its command writes it. Sent only by bridge instructions, so the bridge can tell an old paste.',
   XDG_CONFIG_HOME: 'Where <config> lives: $XDG_CONFIG_HOME/bridge, or ~/.config/bridge.',
 };
 const configDir = (env) => join(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config'), 'bridge');
@@ -848,7 +852,7 @@ async function run(argv, env) {
   checkUse(cmd, args, values);
   const timeoutMs = timeoutOf(values);
   if (cmd.doctor) return doctor(values, env, timeoutMs);
-  const req = cmd.request(args, values);
+  const req = cmd.request(args, values, env);
   const key = values['idempotency-key'];
   // Only tasks create stores a key. The other writes are naturally repeatable; the header is there for a server that reads it.
   if (key !== undefined && req.body?.idempotency_key === undefined) req.headers = { 'idempotency-key': key };

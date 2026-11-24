@@ -71,7 +71,7 @@ The project uses [Semantic Versioning](https://semver.org/). While the version i
 | Kind of change | Version bump | What an existing install must do |
 |---|---|---|
 | Served instructions text (`ROUTINE_INSTRUCTIONS`, `CLI_INSTRUCTIONS`) | patch | Deploy. Nothing else: agents pick it up on their next run |
-| Bootstrap text (`ROUTINE_BOOTSTRAP`, `CLI_BOOTSTRAP`) | minor | Paste the new bootstrap into every agent again. **Action required** |
+| Bootstrap text (`ROUTINE_BOOTSTRAP`, `CHAT_BOOTSTRAP`, `CLI_BOOTSTRAP`) | minor | Raise `BOOTSTRAP_VERSION` and add its `HISTORY` entry in `test/release.test.ts` (the test says how). Paste the new bootstraps into every agent again. **Action required** |
 | Database migration (a new file in `db/`) | minor | Back up first, then `pnpm db:migrate` before the deploy (`docs/runbook.md`, "Later deployments"). With Docker, `docker compose up --build -d` applies it. **Action required** |
 | CLI (`cli/bridge.mjs`) | patch for a fix, minor for a new command or a change that breaks a script | Each agent runs `bridge update --sha256 <hash>`, with the hash from the release notes |
 | Environment variable, new and optional | minor | Nothing, unless they want the feature |
@@ -82,7 +82,7 @@ The project uses [Semantic Versioning](https://semver.org/). While the version i
 
 Every change gets a line in `CHANGELOG.md` under `[Unreleased]`, in the same PR. A change marked **Action required** goes in a `### Action required` section, first in its version, and says exactly what to run or paste.
 
-A test pins the hash of each bootstrap. If it fails, the bootstrap changed: follow the steps in its message.
+A test pins the hash of each bootstrap at each `BOOTSTRAP_VERSION`. If it fails, a bootstrap changed without a new version: follow the steps in its message. The version is what lets an agent with an old paste tell its owner so (`docs/agents.md`).
 
 ### Cutting a release
 
@@ -110,7 +110,8 @@ A test pins the hash of each bootstrap. If it fails, the bootstrap changed: foll
    gh release create vX.Y.Z --verify-tag --title vX.Y.Z --notes-file notes.md
    ```
 
-8. Deploying is a separate step and also needs the maintainer's approval. Afterwards, `curl https://<url>/health` shows the version that is running.
+8. If a bootstrap changed in this release, rebuild the public Grok Bot template from the new `/activate/grok` text. It holds a pasted copy, so it does not follow the repository by itself.
+9. Deploying is a separate step and also needs the maintainer's approval. Afterwards, `curl https://<url>/health` shows the version that is running.
 
 ### What must never be published
 

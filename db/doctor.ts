@@ -6,6 +6,8 @@ import { readdirSync } from 'node:fs';
 import pg from 'pg';
 import { alertWebhook } from '../src/alert.ts';
 import { agentKeys } from '../src/bridge.ts';
+import { aboutOf } from '../src/instructions.ts';
+import { agentAbout } from './setup.ts';
 import { connectionConfig } from '../src/db.ts';
 import { EMAIL_ADAPTER, emailConfig } from '../src/email.ts';
 import { GROK_ADAPTER, grokConfig } from '../src/grok.ts';
@@ -125,7 +127,8 @@ export async function doctor(env: Env, { fetch: get = fetch } = {}): Promise<Che
           settings ? undefined : `run ${SETUP}, which sets them on bridge_app, then restart the bridge`);
         if (!who!.found) return; // Every query below would fail on a missing table.
 
-        const { rows: agents } = await c.query<{ id: string; adapter: string; enabled: boolean }>('SELECT id, adapter, enabled FROM agent ORDER BY id');
+        const { rows: agents } = await c.query<{ id: string; adapter: string; enabled: boolean; about: unknown }>(
+          `SELECT id, adapter, enabled, config->'about' AS about FROM agent ORDER BY id`);
         const byId = new Map(agents.map((a) => [a.id, a]));
         const missing = ids.filter((id) => !byId.has(id));
         add('agents registered', missing.length ? 'fail' : 'ok',
@@ -136,6 +139,22 @@ export async function doctor(env: Env, { fetch: get = fetch } = {}): Promise<Che
           else if (!loaded.includes(a.adapter)) {
             add(`agent ${a.id}`, 'warn', `adapter ${a.adapter} is not loaded: its tasks wait without spending attempts`,
               a.adapter === GROK_ADAPTER ? 'set GROK_WEBHOOK_URL and GROK_WEBHOOK_KEY' : a.adapter === EMAIL_ADAPTER ? 'set the email variables, see docs/email.md' : 'set adapter to grok, email or http');
+          }
+        }
+
+        // Descriptions are what other agents read to pick whom to ask. Warnings only: nothing breaks without them.
+        const bare = agents.filter((a) => a.enabled && !aboutOf(a.about)).map((a) => a.id);
+        add('agent descriptions', bare.length ? 'warn' : 'ok', bare.length ? `no description for ${bare.join(', ')}` : `all ${agents.filter((a) => a.enabled).length} enabled agent(s) have one`,
+          bare.length ? 'set BRIDGE_AGENT_ABOUT, for example {"grok":"Web and X research, public pages"}, and run ' + SETUP + '; see docs/agents.md' : undefined);
+        if (env.BRIDGE_AGENT_ABOUT) {
+          try {
+            const wanted = agentAbout(env.BRIDGE_AGENT_ABOUT, agents.map((a) => a.id), 'row in bridge.agent');
+            const stored = new Map(agents.map((a) => [a.id, typeof a.about === 'string' ? a.about : '']));
+            const differ = Object.entries(wanted).filter(([id, text]) => stored.get(id) !== text).map(([id]) => id);
+            add('BRIDGE_AGENT_ABOUT', differ.length ? 'warn' : 'ok', differ.length ? `differs from the agent rows for ${differ.join(', ')}` : `matches the agent rows for ${Object.keys(wanted).length} agent(s)`,
+              differ.length ? `run ${SETUP}` : undefined);
+          } catch (e) {
+            add('BRIDGE_AGENT_ABOUT', 'warn', (e as Error).message, 'fix BRIDGE_AGENT_ABOUT, or remove it');
           }
         }
 

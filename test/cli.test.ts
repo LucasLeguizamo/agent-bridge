@@ -947,3 +947,35 @@ describe('tasks view', () => {
     });
   }
 });
+
+describe('the bootstrap version the CLI passes on', () => {
+  // The CLI bootstrap runs "BRIDGE_BOOTSTRAP=<n> node ~/.local/bin/bridge.mjs instructions": an environment variable,
+  // so a CLI from before this existed ignores it where an unknown option would make it exit 2.
+  const instructionsHit = async (env: Record<string, string | undefined>) => {
+    bridge.hits = [];
+    bridge.handler = (_, res) => json(res, 200, { agent: 'instinct', version: 'abc', text: 'x' });
+    const r = await cli(['instructions'], { env });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(bridge.hits.length, 1);
+    return bridge.hits[0]!;
+  };
+
+  test('is sent as ?bootstrap=<n> on bridge instructions, with the CLI version in the user agent', async () => {
+    const hit = await instructionsHit({ BRIDGE_BOOTSTRAP: '3' });
+    assert.equal(hit.url, '/instructions?bootstrap=3');
+    assert.match(hit.headers['user-agent']!, /^agent-bridge-cli\/\d+\.\d+\.\d+$/);
+  });
+
+  test('is not sent when unset, and a value that is not plain digits is dropped, never an error', async () => {
+    assert.equal((await instructionsHit({})).url, '/instructions');
+    for (const junk of ['', 'x', '1.5', '-1', '01', '1 ', '1&mode=owner', '1000000', '١']) {
+      assert.equal((await instructionsHit({ BRIDGE_BOOTSTRAP: junk })).url, '/instructions', JSON.stringify(junk));
+    }
+  });
+
+  test('no other command carries it', async () => {
+    bridge.hits = [];
+    assert.equal((await cli(['whoami'], { env: { BRIDGE_BOOTSTRAP: '3' } })).code, 0);
+    assert.equal(bridge.hits[0]!.url, '/whoami');
+  });
+});
