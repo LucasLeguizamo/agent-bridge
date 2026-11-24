@@ -44,9 +44,11 @@ const SECRET_SHAPES = [
   /\bre_[A-Za-z0-9_]{20,}/, // Resend key
   /hooks\.slack\.com\/services\//i, // A Slack webhook URL is a secret
   /\bAIza[0-9A-Za-z_-]{30,}/,
-  /\beyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{5,}/, // JWT
-  /\bBearer\s+[\w.~+/-]{16,}/i,
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:[^\s/@]+@/i, // credentials in a URL
+  // The header is short; bounding it keeps a run of "eyJ-eyJ-..." from rescanning the rest of the text at each start.
+  /\beyJ[\w-]{10,300}\.[\w-]{10,}\.[\w-]{5,}/, // JWT
+  /\bBearer\s{1,256}[\w.~+/-]{16,}/i,
+  // Scheme and userinfo are bounded: unbounded, "a.a.a." re-reads the whole text from every start. Real ones are shorter.
+  /\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s:/@]{1,256}:[^\s/@]{1,1024}@/i, // credentials in a URL
   /\b[a-f0-9]{32,}\b/i, // Refuses git SHAs too: acceptable, a fact rarely needs one.
   // Labelled values, including JSON. Not bare words: 'the secret garden' and 'la clave es practicar' are ordinary text.
   /\b(?:password|passwd|pwd|secret|api[_ -]?key|access[_ -]?token|auth[_ -]?token|private[_ -]?key|contraseña|clave[_ ](?:de[_ ]acceso|secreta))["']?\s*[=:]\s*\S+/i,

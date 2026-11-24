@@ -14,7 +14,7 @@ import { createBridge } from '../src/bridge.ts';
 import { connectionConfig } from '../src/db.ts';
 import { createApp } from '../src/http.ts';
 import { runPass, type Adapters } from '../src/queue.ts';
-import { createTask, type Task } from '../src/tasks.ts';
+import { createTask, finishTask, type Task } from '../src/tasks.ts';
 import { openTestSchema } from './pg.ts';
 
 const ROOT = new URL('..', import.meta.url);
@@ -147,6 +147,23 @@ describe('the wired bridge', () => {
       assert.deepEqual(await res.json(), { status: 'ok', claimed: 1 });
       assert.deepEqual(hits.map((h) => JSON.parse(h)), [{ task_id: task.id }]);
       assert.equal((await b.app.request('/mcp', { method: 'POST', body: '{}' })).status, 401);
+    });
+  });
+
+  test('a pass wakes the asker of an ended task: the wiring in createBridge, not only wakeAskers', async (t) => {
+    t.mock.method(console, 'log', () => {});
+    const b = bridgeOf();
+    await within(b, async () => {
+      const { task } = await createTask(pool, 'grok', newTask({ to_agent: 'instinct' }));
+      await pool.query('UPDATE task SET attempts = 1 WHERE id = $1', [task.id]);
+      await finishTask(pool, task.id, 'instinct', 'completed', { result: '42' });
+      await pool.query('ALTER TABLE event DISABLE TRIGGER event_immutable');
+      await pool.query(`UPDATE event SET created_at = now() - interval '5 minutes' WHERE task_id = $1`, [task.id]);
+      await pool.query('ALTER TABLE event ENABLE TRIGGER event_immutable');
+      assert.deepEqual(await (await cron(b.app, CRON_SECRET)).json(), { status: 'ok', claimed: 0 });
+      assert.deepEqual(hits.map((h) => JSON.parse(h)), [{ task_id: task.id }]);
+      await cron(b.app, CRON_SECRET);
+      assert.equal(hits.length, 1, 'once');
     });
   });
 
@@ -509,6 +526,14 @@ describe('deploy files', () => {
     assert.doesNotMatch(read('src/queue.ts'), /setInterval|setTimeout\(loop|startDispatcher/);
     assert.doesNotMatch(read('src/index.ts'), /setInterval|standalone/);
     assert.doesNotMatch(read('package.json'), /src\/main\.ts/);
+  });
+
+  test('vercel.json sets maxDuration on the Hono entry file, within what Hobby allows', () => {
+    const v = JSON.parse(read('vercel.json')) as { functions: Record<string, { maxDuration: number }> };
+    assert.deepEqual(Object.keys(v.functions), ['src/index.ts']);
+    assert.ok(existsSync(new URL('src/index.ts', ROOT)) && /from 'hono'/.test(read('src/index.ts')));
+    const { maxDuration } = v.functions['src/index.ts']!;
+    assert.ok(Number.isInteger(maxDuration) && maxDuration >= 120 && maxDuration <= 300, String(maxDuration));
   });
 
   test('vercel.json keeps functions next to Supabase in us-west-2, in a single region as Hobby requires', () => {

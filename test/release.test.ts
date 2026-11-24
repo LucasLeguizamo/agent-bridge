@@ -7,7 +7,7 @@ import { describe, test } from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { Hono } from 'hono';
 import type { Pool } from 'pg';
-import { CLI_BOOTSTRAP, ROUTINE_BOOTSTRAP } from '../src/instructions.ts';
+import { CHAT_BOOTSTRAP, CLI_BOOTSTRAP, ROUTINE_BOOTSTRAP } from '../src/instructions.ts';
 import { mountMcp } from '../src/mcp.ts';
 import { VERSION } from '../src/version.ts';
 
@@ -45,10 +45,11 @@ describe('one version', () => {
 describe('bootstraps', () => {
   // A bootstrap is pasted by hand into each agent, once. Unlike the served instructions, a deploy does not update it.
   const PINNED = {
-    ROUTINE_BOOTSTRAP: '6e5f4887dfd30c8cfb17e40bcca7313633fe10238dea8266febba89118cbc256',
-    CLI_BOOTSTRAP: '644a19f89d05c783069dff5bdbf2da5051a0ac1ab7b38b51be1472723c8f9f29',
+    ROUTINE_BOOTSTRAP: '030bf02a8e704d74208707708aaf9452378ac75da51e0fb0c7dc75bfb03526ff',
+    CLI_BOOTSTRAP: 'a4b84d7361bbb8c21f997ce655c6aa270d76d580f840c5ecbc78f8ebbdbdb7ec',
+    CHAT_BOOTSTRAP: 'c404bdb6c70f37b0ce22f18bb41c89479e22398ae2e5acca39dff7a189f9a239',
   };
-  const texts = { ROUTINE_BOOTSTRAP, CLI_BOOTSTRAP };
+  const texts = { ROUTINE_BOOTSTRAP, CLI_BOOTSTRAP, CHAT_BOOTSTRAP };
 
   for (const name of Object.keys(PINNED) as (keyof typeof PINNED)[]) {
     test(`${name} is the text every install already pasted`, () => {

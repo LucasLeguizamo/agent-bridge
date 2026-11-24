@@ -167,8 +167,11 @@ export async function hasDueWork(pool: Pool) {
 
 /**
  * What a cron tick or a new task triggers. Runs every minute with nothing to do, so an idle pass is this one read.
- * Worst case with every query at its timeout stays under maxDuration in vercel.json. A pass killed anyway loses nothing:
- * its tasks are retried when the lease ends. A function is resolved only when there is work, and then on every pass, so
+ * maxDuration in vercel.json is 300 s. With every query at its 15 s timeout, the dispatch part (due check, sweep, claim,
+ * deliveries at 30 s, acks) takes at most 90 s, and the wake-ups after it at most 70 s (grok.ts: a 30 s budget, then one
+ * claim, one send and one event). Sending result mails (email.ts) is a third phase with its own limits and is not counted
+ * here. A pass killed anyway loses nothing: its tasks are retried when the lease ends, and a wake-up in flight leaves an
+ * `asker_waking` event with no outcome. A function is resolved only when there is work, and then on every pass, so
  * a breaker can hold an adapter's tasks without burning attempts.
  */
 export async function runPass(pool: Pool, adapters: Adapters | (() => Promise<Adapters>), timeoutMs?: number) {

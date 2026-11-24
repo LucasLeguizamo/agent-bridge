@@ -8,10 +8,10 @@ import { serve, type ServerType } from '@hono/node-server';
 import pg from 'pg';
 import { createApp } from '../src/http.ts';
 import { mountMcp } from '../src/mcp.ts';
-import { memoryWrite } from '../src/memory.ts';
-import { breakerGate, breakerOpen, createGrokAdapter, grokConfig } from '../src/grok.ts';
-import { runOnce, type Adapters } from '../src/queue.ts';
-import { createTask, type Task } from '../src/tasks.ts';
+import { memoryLog, memoryWrite } from '../src/memory.ts';
+import { breakerGate, breakerOpen, createGrokAdapter, grokConfig, wakeAskers } from '../src/grok.ts';
+import { nackDelivery, runOnce, sweep, type Adapters } from '../src/queue.ts';
+import { cancelTask, createTask, finishTask, type Task } from '../src/tasks.ts';
 import { openTestSchema } from './pg.ts';
 
 const WEBHOOK_KEY = 'w'.repeat(40);
@@ -323,6 +323,17 @@ describe('task_claim', () => {
     assert.equal(rows.length, 1);
   });
 
+  test('the MCP tools never return the wake bookkeeping of a task', async () => {
+    const t = await offered();
+    await pool.query('UPDATE task SET asker_seen_at = now(), asker_woken_at = now() WHERE id = $1', [t.id]);
+    const client = await mcp('grok');
+    const claimed = await tool(client, 'task_claim', { task_id: t.id });
+    const done = await tool(client, 'task_complete', { task_id: t.id, status: 'completed', output: { result: 'ok' } });
+    const made = await tool(client, 'task_create', { to_agent: 'claude', intent: 'research', input: { query: 'zz' }, idempotency_key: 'mcp-1' });
+    for (const r of [claimed, done, made]) assert.doesNotMatch(JSON.stringify(r.body), /asker_/);
+    assert.equal(done.isError, false);
+  });
+
   test('forged, repeated and foreign ids all get the same empty answer and change nothing', async () => {
     const client = await mcp('grok');
     const claimed = await offered();
@@ -597,6 +608,214 @@ describe('breaker and claims', () => {
     await pool.query('UPDATE task SET attempts = 1 WHERE id = $1', [own.id]);
     assert.equal((await tool(await mcp('claude'), 'task_claim', { task_id: own.id })).body.claimed, true);
     assert.equal(await breakerOpen(pool, 0), true);
+  });
+});
+
+describe('waking the asker', () => {
+  const cfg = () => ({ url: receiverUrl, key: WEBHOOK_KEY });
+  const asked = async () => (await newTask('grok', 'instinct')).task;
+  // The real ending paths, so each writes the event the quiet time reads.
+  const offer = (id: string) => pool.query('UPDATE task SET attempts = 1 WHERE id = $1', [id]);
+  const complete = async (id: string) => { await offer(id); await finishTask(pool, id, 'instinct', 'completed', { result: '42' }); };
+  const fail = async (id: string) => { await offer(id); await finishTask(pool, id, 'instinct', 'failed', { reason: 'nope' }); };
+  const expire = async (id: string) => {
+    await pool.query(`UPDATE task SET deadline_at = now() - interval '1 second', state = 'working' WHERE id = $1`, [id]);
+    await sweep(pool);
+  };
+  const exhaust = async (id: string) => {
+    await pool.query(`UPDATE task SET attempts = 5, next_attempt_at = now() WHERE id = $1`, [id]);
+    await sweep(pool);
+  };
+  const end = async (id: string) => { await complete(id); return id; };
+  const endedTask = async () => end((await asked()).id);
+  const eventsOf = async (id: string) =>
+    (await pool.query<{ type: string }>('SELECT type FROM event WHERE task_id = $1 ORDER BY id', [id])).rows.map((r) => r.type);
+  // Events are append-only; the test schema is private, so lifting the trigger for one statement is safe here.
+  const ageEvents = async (id: string, seconds: number) => {
+    await pool.query('ALTER TABLE event DISABLE TRIGGER event_immutable');
+    await pool.query(`UPDATE event SET created_at = now() - make_interval(secs => $2) WHERE task_id = $1`, [id, seconds]);
+    await pool.query('ALTER TABLE event ENABLE TRIGGER event_immutable');
+  };
+  const wake = (quiet = '0 seconds', more: Record<string, unknown> = {}) => wakeAskers(pool, cfg(), { quiet, ...more });
+  const woken = async (id: string) => (await reload(id) as Record<string, unknown>).asker_woken_at;
+
+  test('a completed task is woken once, with only task_id and the bearer key', async () => {
+    const id = await endedTask();
+    assert.equal(await wake(), 1);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]!.headers.authorization, `Bearer ${WEBHOOK_KEY}`);
+    assert.deepEqual(JSON.parse(hits[0]!.body), { task_id: id });
+    assert.ok(await woken(id));
+    const types = await eventsOf(id);
+    assert.ok(types.indexOf('asker_waking') < types.indexOf('asker_woken'), 'the start is on record before the outcome');
+    assert.equal(await wake(), 0);
+    assert.equal(hits.length, 1);
+  });
+
+  test('a failed task is woken too', async () => {
+    const t = await asked();
+    await fail(t.id);
+    assert.equal(await wake(), 1);
+  });
+
+  test('every ending that should wake does, and a cancel does not', async () => {
+    const nack = async (id: string) => {
+      await pool.query('UPDATE task SET attempts = 5 WHERE id = $1', [id]);
+      await nackDelivery(pool, { id, attempts: 5 }, 'boom');
+    };
+    const paths = { complete, fail, expire, exhaust, nack };
+    for (const [name, path] of Object.entries(paths)) {
+      const t = await asked();
+      await path(t.id);
+      assert.equal((await reload(t.id)).state, name === 'complete' ? 'completed' : 'failed', name);
+      assert.equal(await wake('90 seconds'), 0, `${name}: too soon`);
+      await ageEvents(t.id, 120);
+      assert.equal(await wake('90 seconds'), 1, `${name}: after the quiet time`);
+    }
+    const c = await asked();
+    await cancelTask(pool, c.id, 'grok');
+    await ageEvents(c.id, 120);
+    assert.equal(await wake('90 seconds'), 0);
+    assert.equal(hits.length, 5);
+  });
+
+  test('an open or rejected task is not woken', async () => {
+    const open = await asked();
+    const rejected = await asked();
+    await pool.query(`UPDATE task SET state = 'rejected' WHERE id = $1`, [rejected.id]);
+    assert.equal(open.state, 'submitted');
+    assert.equal(await wake(), 0);
+    assert.equal(hits.length, 0);
+  });
+
+  test('a task the asker already read is not woken', async () => {
+    const id = await endedTask();
+    await pool.query('UPDATE task SET asker_seen_at = now() WHERE id = $1', [id]);
+    assert.equal(await wake(), 0);
+    assert.equal(hits.length, 0);
+  });
+
+  test('only routine agents are woken', async () => {
+    const t = (await newTask('instinct', 'grok')).task;
+    await offer(t.id);
+    await pool.query(`UPDATE task SET state = 'working', claimed_at = now() WHERE id = $1`, [t.id]);
+    await finishTask(pool, t.id, 'grok', 'completed', { result: '1' });
+    assert.equal(await wake(), 0);
+    assert.equal(hits.length, 0);
+  });
+
+  test('a disabled asker is not woken', async () => {
+    await endedTask();
+    await pool.query(`UPDATE agent SET enabled = false WHERE id = 'grok'`);
+    assert.equal(await wake(), 0);
+    assert.equal(hits.length, 0);
+  });
+
+  test('nothing is sent while the breaker has sends paused', async () => {
+    await endedTask();
+    await pool.query(`INSERT INTO adapter_pause (adapter, paused_until, reason) VALUES ('grok', now() + interval '1 hour', 'test')`);
+    assert.equal(await wake(), 0);
+    assert.equal(hits.length, 0);
+  });
+
+  test('with the default quiet time, 89 seconds is too soon and 91 is enough', async () => {
+    const id = await endedTask();
+    assert.equal(await wakeAskers(pool, cfg()), 0);
+    await ageEvents(id, 89);
+    assert.equal(await wakeAskers(pool, cfg()), 0);
+    await ageEvents(id, 91);
+    assert.equal(await wakeAskers(pool, cfg()), 1);
+    assert.equal(hits.length, 1);
+  });
+
+  test('the receiver cannot hold a wake-up back with events of its own', async () => {
+    const id = await endedTask();
+    await ageEvents(id, 120);
+    await memoryLog(pool, 'instinct', { type: 'note', payload: { x: 1 }, task_id: id });
+    await assert.rejects(finishTask(pool, id, 'instinct', 'completed', { result: 'password: hunter2hunter2' }), { message: 'secret_rejected' });
+    const types = await eventsOf(id);
+    assert.ok(types.includes('agent.note') && types.includes('secret_rejected'), 'both events are on the task');
+    assert.equal(await wake('90 seconds'), 1);
+  });
+
+  test('a legitimate wake at 26 hours happens, one past the window does not', async () => {
+    const late = await endedTask();
+    const gone = await endedTask();
+    await pool.query(`UPDATE task SET created_at = now() - interval '26 hours' WHERE id = $1`, [late]);
+    await pool.query(`UPDATE task SET created_at = now() - interval '51 hours' WHERE id = $1`, [gone]);
+    assert.equal(await wake(), 1);
+    assert.deepEqual(hits.map((h) => JSON.parse(h.body).task_id), [late]);
+  });
+
+  test('a refused wake-up is recorded and not retried', async () => {
+    const id = await endedTask();
+    nextStatus = [500];
+    assert.equal(await wake(), 1);
+    const types = await eventsOf(id);
+    assert.ok(types.includes('asker_wake_failed'));
+    assert.ok(!types.includes('asker_woken'));
+    assert.equal(await wake(), 0);
+    assert.equal(hits.length, 1);
+  });
+
+  test('wake-ups do not trip the breaker', async () => {
+    for (let i = 0; i < 3; i++) await endedTask();
+    assert.equal(await wake(), 3);
+    assert.equal(await breakerOpen(pool, 0), false);
+  });
+
+  test('one pass wakes at most 5 tasks', async () => {
+    for (let i = 0; i < 7; i++) await endedTask();
+    assert.equal(await wake(), 5);
+    assert.equal(await wake(), 2);
+  });
+
+  test('a pass cut mid-batch loses only the wake in flight, and says so', async () => {
+    const ids = [await endedTask(), await endedTask(), await endedTask()];
+    hang = true;
+    // 200 ms to send, 300 ms to start new ones: the first two are tried, the third is never taken.
+    assert.equal(await wake('0 seconds', { timeoutMs: 200, budgetMs: 300 }), 2);
+    hang = false;
+    const marked = await Promise.all(ids.map(woken));
+    assert.deepEqual(marked.map(Boolean), [true, true, false]);
+    for (const id of ids.slice(0, 2)) assert.ok((await eventsOf(id)).includes('asker_wake_failed'));
+    assert.deepEqual(await eventsOf(ids[2]!), ['task_created', 'task_completed']);
+    assert.equal(await wake(), 1, 'the one that was never taken goes in the next pass');
+  });
+
+  test('a send that never answers leaves its start on record', async () => {
+    const id = await endedTask();
+    // What a killed function leaves: the claim ran, nothing after it. The marker event is the trace.
+    const stuck = { query: (sql: string, params?: unknown[]) =>
+      /'asker_woken'|'asker_wake_failed'/.test(sql) ? Promise.reject(new Error('killed')) : pool.query(sql, params) } as unknown as pg.Pool;
+    hang = true;
+    await wakeAskers(stuck, cfg(), { quiet: '0 seconds', timeoutMs: 100 });
+    hang = false;
+    const types = await eventsOf(id);
+    assert.ok(types.includes('asker_waking') && !types.includes('asker_woken') && !types.includes('asker_wake_failed'));
+  });
+
+  test('a failed event insert does not drop the wake-ups after it', async () => {
+    const ids = [await endedTask(), await endedTask(), await endedTask()];
+    const flaky = { query: (sql: string, params?: unknown[]) =>
+      /'asker_woken'/.test(sql) ? Promise.reject(new Error('insert failed')) : pool.query(sql, params) } as unknown as pg.Pool;
+    assert.equal(await wakeAskers(flaky, cfg(), { quiet: '0 seconds' }), 3);
+    assert.deepEqual(hits.map((h) => JSON.parse(h.body).task_id).sort(), [...ids].sort());
+  });
+
+  test('passes on separate connections wake each task once', async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 12; i++) ids.push(await endedTask());
+    const pools = Array.from({ length: 10 }, () => new pg.Pool({ connectionString: db!.url, max: 1 }));
+    try {
+      const counts = await Promise.all(pools.map((p) => wakeAskers(p, cfg(), { quiet: '0 seconds' })));
+      assert.equal(await wake(), 12 - counts.reduce((a, b) => a + b, 0), 'what the 10 left, one more pass finishes');
+      const sent = hits.map((h) => JSON.parse(h.body).task_id as string);
+      assert.equal(sent.length, 12);
+      assert.deepEqual(sent.sort(), [...ids].sort(), 'no task twice');
+    } finally {
+      await Promise.all(pools.map((p) => p.end()));
+    }
   });
 });
 

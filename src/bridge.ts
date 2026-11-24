@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { alertWebhook, configureAlerts } from './alert.ts';
 import { connectionConfig } from './db.ts';
 import { createEmailAdapter, createResendProvider, EMAIL_ADAPTER, EMAIL_ENV, emailConfig, emailRoutes, sendDelegationResults } from './email.ts';
-import { breakerGate, createGrokAdapter, GROK_ADAPTER, grokConfig } from './grok.ts';
+import { breakerGate, createGrokAdapter, GROK_ADAPTER, grokConfig, wakeAskers } from './grok.ts';
 import { createApp, dispatchSoon } from './http.ts';
 import { logError } from './log.ts';
 import { mountMcp } from './mcp.ts';
@@ -67,6 +67,8 @@ export function createBridge(env: Env, { defer = waitUntil as (p: Promise<unknow
     const claimed = await runPass(pool, gate);
     // Its own failure must not fail the pass: those tasks are already delivered, and results retry on the next one.
     if (mail) await sendDelegationResults(pool, mail.config, mail.provider).catch((e: unknown) => logError('email results', e));
+    // Same rule: a failed wake-up must not fail the pass.
+    if (grok) await wakeAskers(pool, grok).catch((e: unknown) => logError('asker wake', e));
     return claimed;
   };
   const secrets = [env.GROK_WEBHOOK_KEY, env.EMAIL_TOKEN_SECRET, env.RESEND_WEBHOOK_SECRET, env.RESEND_API_KEY];

@@ -251,7 +251,7 @@ When finished, reply to this thread. Put durable findings in lines starting with
 
 ## 8. Grok Bot adapter
 
-> **Status, Nov 2026 (shipped).** The design below is kept as decided. One change from it: Grok Bot has no UI to give a custom MCP server an `Authorization` header, so the shipped routine talks to the bridge with `curl` to the HTTP API and `Authorization: Bearer $BRIDGE_TOKEN`, with the same operations as the MCP tools (`/instructions`, `/tasks/:id/claim`, `/tasks`, `/tasks/:id/complete` and `/fail`, `/memory/search`, `/memory/facts`). The MCP server at `/mcp` still ships, as an optional path for clients that can send a header. Read "MCP" below as "the bridge's API". Setup and troubleshooting: `docs/grok-bot.md`.
+> **Status, Nov 2026 (shipped).** The design below is kept as decided. One change from it: Grok Bot has no UI to give a custom MCP server an `Authorization` header, so the shipped routine talks to the bridge with `curl` to the HTTP API and `Authorization: Bearer $BRIDGE_TOKEN`, with the same operations as the MCP tools (`/instructions`, `/tasks/:id/claim`, `/tasks`, `/tasks/:id/complete` and `/fail`, `/memory/search`, `/memory/facts`). The MCP server at `/mcp` still ships, as an optional path for clients that can send a header. Read "MCP" below as "the bridge's API". Setup and troubleshooting: `docs/grok-bot.md`. A routine agent can also start a question when its owner asks in its own conversation: it fetches `GET /instructions?mode=owner`, creates the task, and waits for the result with `GET /tasks/:id/answer`.
 
 ### Routes
 
@@ -285,6 +285,7 @@ A socket would add nothing: the agent reasons only inside a run, and a trigger o
 - **Duplicates:** retries can open two runs. `task_claim` is atomic: only one takes it.
 - **`200` is not "finished":** the bridge waits for `task_complete` until `deadline_at`. A `200` also does not prove the computer is available.
 - **Cost with the Bot down:** a user [reported](https://forum.cursor.com/t/grok-bot-0-30-0-unusable-for-4-days-cant-reach-computer-stuck-previous-image-webhook-routines-still-burn-usage/170315) runs that kept firing and consuming quota while the computer was unreachable. Circuit breaker: 3 consecutive runs without `task_claim` within 15 min pause sends to Grok Bot and raise an alert.
+- **Answers to the Bot's own questions:** the Bot only reasons inside a run, so it cannot wait for a slow answer. When a task the Bot created ends and the Bot has not read it, the bridge fires the webhook once with that `task_id`; the claim fails, and the run reads the answer and tells the owner.
 - **No inbound record:** Grok Bot keeps only 20 runs per routine. The audit lives in `event`.
 
 ### Email with flags: what they solve and what they do not

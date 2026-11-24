@@ -6,6 +6,7 @@ import { routePath } from 'hono/route';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { mountActivation } from './activation.ts';
+import { agentDirectory } from './agents.ts';
 import { mountDashboard } from './dashboard.ts';
 import { fill, instructionsFor, versionOf } from './instructions.ts';
 import { claimReply, pendingTasks, PendingInput } from './claim.ts';
@@ -13,7 +14,7 @@ import { logError } from './log.ts';
 import { ContextPackInput, contextPack, DATA_LABEL, memoryEvents, MemoryEventsInput, memoryHistory, MemoryHistoryInput, memoryLog, MemoryLogInput,
   memorySearch, MemorySearchInput, memoryWrite, MemoryWriteInput } from './memory.ts';
 import { jsonWithin, stripHiddenDeep } from './secrets.ts';
-import { BridgeError, cancelTask, createTask, findTask, finishTask, getEvents } from './tasks.ts';
+import { BridgeError, cancelTask, createTask, findAnswer, findTask, finishTask, getEvents, markSeen, MAX_ANSWER_WAIT_SECONDS, taskView } from './tasks.ts';
 import { VERSION } from './version.ts';
 
 const sha = (s: string) => createHash('sha256').update(s).digest();
@@ -34,6 +35,7 @@ export const NewTaskBody = z.strictObject({
 export const TaskOutput = z.record(z.string(), z.unknown()).refine((v) => jsonWithin(v, MAX_TASK_OUTPUT_BYTES), 'output too large or too deep');
 const OutputBody = z.strictObject({ output: TaskOutput });
 const TaskId = z.uuid();
+const AnswerQuery = z.strictObject({ wait: z.coerce.number().int().min(0).max(MAX_ANSWER_WAIT_SECONDS).optional() });
 
 export type AppOptions = {
   /** Bearer token for /cron/dispatch. Unset or short means that route always answers 401. */
@@ -137,18 +139,27 @@ export function createApp(pool: Pool, keys: Record<string, string>, options: App
     const self = rows.find((r) => r.id === c.get('agent'));
     if (!self) return c.json({ error: 'agent_disabled' }, 403);
     const others = rows.filter((r) => r !== self).map(({ id, about }) => ({ id, about }));
-    const text = fill(instructionsFor(self.adapter), new URL(c.req.url).origin, others);
+    const mode = c.req.query('mode') ?? 'task';
+    if (mode !== 'task' && mode !== 'owner') throw new BridgeError(400, 'invalid_body');
+    const source = instructionsFor(self.adapter, mode);
+    if (!source) throw new BridgeError(404, 'not_found');
+    const text = fill(source, new URL(c.req.url).origin, others);
     return c.json({ agent: self.id, version: versionOf(text), text });
   });
 
   app.post('/tasks', async (c) => {
     const { task, created } = await createTask(pool, c.get('agent'), await parse(NewTaskBody, c.req));
-    if (task.state === 'rejected') return c.json({ task }, 422);
+    if (task.state === 'rejected') return c.json({ task: taskView(task) }, 422);
     if (created && task.state === 'submitted') kick();
-    return c.json({ task }, created ? 201 : 200);
+    return c.json({ task: taskView(task) }, created ? 201 : 200);
   });
   // Reads return what agents wrote, so they say it is data and drop what a human could not see.
   const data = (c: Context, body: Record<string, unknown>) => c.json({ data_label: DATA_LABEL, ...stripHiddenDeep(body) });
+
+  app.get('/agents', async (c) => {
+    const directory = await agentDirectory(pool, c.get('agent'));
+    return directory ? data(c, directory) : c.json({ error: 'agent_disabled' }, 403);
+  });
 
   // Before /tasks/:id, which would read "pending" as an id.
   app.get('/tasks/pending', async (c) =>
@@ -156,20 +167,29 @@ export function createApp(pool: Pool, keys: Record<string, string>, options: App
   // Same answer as the MCP tool, including for a malformed id: it is not run through idOf, which would answer 404.
   app.post('/tasks/:id/claim', async (c) => c.json(await claimReply(pool, c.req.param('id'), c.get('agent'))));
   // Reads take a full id or a unique prefix of 8+ characters (findTask). Every write below needs the full id.
-  app.get('/tasks/:id', async (c) =>
-    data(c, { task: await findTask(pool, c.req.param('id'), c.get('agent')) }));
+  app.get('/tasks/:id', async (c) => {
+    const task = await findTask(pool, c.req.param('id'), c.get('agent'));
+    // The asker reading an ended task has the result, as it does through /answer.
+    if (task.from_agent === c.get('agent') && !['submitted', 'working', 'input_required'].includes(task.state)) await markSeen(pool, task.id);
+    return data(c, { task: taskView(task) });
+  });
   app.get('/tasks/:id/events', async (c) =>
     data(c, { events: await getEvents(pool, c.req.param('id'), c.get('agent')) }));
+  // For the agent that asked: only tasks it created. `wait` holds the request until the task ends, 25 s at most.
+  app.get('/tasks/:id/answer', async (c) => {
+    const { wait } = await parse(AnswerQuery, { json: async () => c.req.query() as unknown });
+    return data(c, { ...await findAnswer(pool, c.req.param('id'), c.get('agent'), wait ?? 0) });
+  });
   app.post('/tasks/:id/complete', async (c) => {
     const { output } = await parse(OutputBody, c.req);
-    return c.json({ task: await finishTask(pool, idOf(c.req.param('id')), c.get('agent'), 'completed', output) });
+    return c.json({ task: taskView(await finishTask(pool, idOf(c.req.param('id')), c.get('agent'), 'completed', output)) });
   });
   app.post('/tasks/:id/fail', async (c) => {
     const { output } = await parse(OutputBody, c.req);
-    return c.json({ task: await finishTask(pool, idOf(c.req.param('id')), c.get('agent'), 'failed', output) });
+    return c.json({ task: taskView(await finishTask(pool, idOf(c.req.param('id')), c.get('agent'), 'failed', output)) });
   });
   app.post('/tasks/:id/cancel', async (c) =>
-    c.json({ task: await cancelTask(pool, idOf(c.req.param('id')), c.get('agent')) }));
+    c.json({ task: taskView(await cancelTask(pool, idOf(c.req.param('id')), c.get('agent'))) }));
 
   const fromQuery = (c: Context) => ({ json: async () => c.req.query() as unknown });
   app.post('/memory/facts', async (c) => {

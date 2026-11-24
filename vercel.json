@@ -1,5 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "hono",
-  "regions": ["pdx1"]
+  "regions": ["pdx1"],
+  "functions": {
+    "src/index.ts": { "maxDuration": 300 }
+  }
 }

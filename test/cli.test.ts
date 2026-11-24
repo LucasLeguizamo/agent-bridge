@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { after, before, beforeEach, describe, test } from 'node:test';
 
 // The real CLI as a child process against a local HTTP server. No database. CLI_NODE runs the CLI on another Node version.
@@ -42,9 +45,10 @@ const listen = async (s: ReturnType<typeof fakeServer>) => {
 
 type Run = { code: number | null; stdout: string; stderr: string; json: any };
 /** Async on purpose: the fake server lives in this process, so a sync spawn would deadlock it. */
-function cli(args: string[], { env = {}, stdin }: { env?: Record<string, string | undefined>; stdin?: string } = {}) {
+function cli(args: string[], { env = {}, stdin, cwd, file = CLI }: { env?: Record<string, string | undefined>; stdin?: string; cwd?: string; file?: string } = {}) {
   const fullEnv = { PATH: process.env.PATH, XDG_CONFIG_HOME: '/nonexistent/agent-bridge', BRIDGE_URL: bridge.url, BRIDGE_TOKEN: TOKEN, ...env };
-  const child = spawn(NODE, [CLI, ...args], { env: fullEnv as NodeJS.ProcessEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+  // The timeout kills the child even when its test already failed, so a watch can never outlive the run.
+  const child = spawn(NODE, [file, ...args], { env: fullEnv as NodeJS.ProcessEnv, cwd, timeout: 20_000, killSignal: 'SIGKILL', stdio: ['pipe', 'pipe', 'pipe'] });
   if (stdin !== undefined) child.stdin.write(stdin);
   child.stdin.end();
   let stdout = '';
@@ -547,7 +551,7 @@ describe('what comes back is data', () => {
 });
 
 describe('help and version', () => {
-  const commands = [['instructions'], ['doctor'], ['update'], ['whoami'], ['tasks', 'pending'], ['tasks', 'get'], ['tasks', 'claim'], ['tasks', 'complete'], ['tasks', 'create'], ['memory', 'search'], ['memory', 'write']];
+  const commands = [['instructions'], ['doctor'], ['update'], ['whoami'], ['agents'], ['tasks', 'pending'], ['tasks', 'get'], ['tasks', 'view'], ['tasks', 'claim'], ['tasks', 'complete'], ['tasks', 'create'], ['memory', 'search'], ['memory', 'write']];
 
   for (const c of commands) {
     test(`${c.join(' ')} --help has an example, needs nothing set, and leaves stdout to JSON`, async () => {
@@ -573,7 +577,7 @@ describe('help and version', () => {
     assert.match(text.stderr, /Exit codes:/);
     assert.match(text.stderr, /Example:/);
     assert.equal((await cli(['tasks', '--help'])).code, 0);
-    assert.equal((await cli(['tasks', '--help', '--json'])).json.commands.length, 5);
+    assert.equal((await cli(['tasks', '--help', '--json'])).json.commands.length, 6);
   });
 
   test('help never shows the token, and asks for no request', async () => {
@@ -650,4 +654,296 @@ describe('doctor', () => {
     assert.match(r.stderr, /belongs to unknown/);
     assert.match(r.stderr, /version unknown/);
   });
+});
+
+describe('tasks view', () => {
+  const HOUR = 3_600_000;
+  const at = (ms: number) => new Date(Date.now() + ms).toISOString();
+  const FILE = `bridge-task-${ID.slice(0, 8)}.html`;
+  const dir = () => realpathSync(mkdtempSync(join(tmpdir(), 'bridge-view-')));
+  const aTask = (over: Record<string, unknown> = {}) => ({
+    id: ID, from_agent: 'grok', to_agent: 'instinct', intent: 'research', risk: 'read', state: 'working', hop: 1, attempts: 2,
+    input: { query: 'hotels' }, output: null, created_at: at(-HOUR), claimed_at: at(-HOUR / 2), deadline_at: at(5 * HOUR + 30_000), ...over,
+  });
+  const anEvent = (over: Record<string, unknown> = {}) => ({ id: '1', task_id: ID, actor: 'grok', type: 'task_created', payload: {}, created_at: at(-HOUR), ...over });
+  /** Serves one task (a list: one per read, the last one repeated) and its events. */
+  const serveTask = (tasks: unknown, events: unknown[] = [anEvent()]) => {
+    const queue = Array.isArray(tasks) ? [...tasks] : [tasks];
+    bridge.handler = (req, res) => {
+      if (req.url!.endsWith('/events')) return json(res, 200, { data_label: 'x', events });
+      if (!req.url!.startsWith('/tasks/')) return json(res, 404, { error: 'not_found' });
+      const next = queue.length > 1 ? queue.shift() : queue[0];
+      return next === 503 ? json(res, 503, {}) : json(res, 200, { data_label: 'x', task: next });
+    };
+  };
+  const view = async (task: unknown, events?: unknown[], args: string[] = []) => {
+    serveTask(task, events);
+    const cwd = dir();
+    const r = await cli(['tasks', 'view', ID.slice(0, 8), ...args], { cwd });
+    assert.equal(r.code, 0, r.stderr);
+    return { r, cwd, html: readFileSync(r.json.file, 'utf8') };
+  };
+  /** Tags as a browser would see them: escaped text never opens one. */
+  const tags = (html: string) => [...new Set([...html.matchAll(/<\/?([a-z][a-z0-9]*)/gi)].map((m) => m[1]!.toLowerCase()))].sort();
+  const ALLOWED_TAGS = ['bdi', 'body', 'dd', 'details', 'div', 'dl', 'dt', 'footer', 'h1', 'h2', 'head', 'header', 'html', 'li',
+    'main', 'meta', 'ol', 'p', 'pre', 'section', 'span', 'strong', 'style', 'summary', 'time', 'title'];
+  const assertSafe = (html: string) => {
+    for (const t of tags(html)) assert.ok(ALLOWED_TAGS.includes(t), `unexpected <${t}>`);
+    assert.doesNotMatch(html, /<[^>]*\s(?:on\w+|href|src|style|action)\s*=/i, 'no handler, link or inline style');
+    assert.doesNotMatch(html, /[\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF\u00AD\uFE00-\uFE0F]|[\u{E0000}-\u{E01FF}]/u, 'no hidden characters');
+    assert.doesNotMatch(html, /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/, 'no control characters');
+  };
+
+  test('writes one private, self-contained file, and prints where it is and the state', async () => {
+    const { r, cwd, html } = await view(aTask());
+    assert.deepEqual(r.json, { file: join(cwd, FILE), state: 'working' });
+    assert.equal(r.stdout.trim().split('\n').length, 1);
+    assert.equal(lstatSync(r.json.file).mode & 0o777, 0o600);
+    assert.deepEqual(readdirSync(cwd), [FILE], 'no temporary file left');
+    assert.deepEqual(bridge.hits.map((h) => `${h.method} ${h.url}`), [`GET /tasks/${ID.slice(0, 8)}`, `GET /tasks/${ID}/events`],
+      'the prefix is resolved first, and the events are read with the full id');
+    for (const h of bridge.hits) assert.equal(h.headers.authorization, `Bearer ${TOKEN}`);
+    assert.ok(html.startsWith('<!doctype html>'));
+    assertSafe(html);
+    assert.ok(!html.includes(TOKEN));
+  });
+
+  test('shows who, what, the state in words, the numbers, the times and the timeline', async () => {
+    const { html } = await view(aTask(), [anEvent(), anEvent({ id: '2', actor: 'instinct', type: 'task_claimed', payload: { attempt: 2 } })]);
+    const text = html.replace(/<style>.*?<\/style>/s, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    assert.match(text, /Task 7b0f3c52/);
+    assert.match(text, /grok → to instinct/);
+    assert.match(text, /Working/, 'the state in words, not only a color');
+    assert.match(text, /Intent research Risk read Hop 1 Attempts 2/);
+    assert.match(text, /Time left 5 h 0 min/);
+    assert.match(text, /task_created grok .*task_claimed instinct/);
+    assert.match(text, /No output yet/);
+    assert.match(html, /<details>\s*<summary>Input/);
+    assert.ok([...html.matchAll(/<time datetime="\d{4}-\d\d-\d\dT[\d:.]+Z">/g)].length >= 5, 'created, claimed, deadline and each event');
+    assert.match(html, /<html lang="en">/);
+    assert.match(html, /name="viewport"/);
+    assert.match(html, /prefers-color-scheme:\s*dark/);
+  });
+
+  test('an open task past its deadline says it is overdue, and a closed one says neither', async () => {
+    assert.match((await view(aTask({ deadline_at: at(-2 * HOUR - 30_000) }))).html, /Overdue by<\/dt>\s*<dd><strong class="late">2 h 0 min/);
+    const done = (await view(aTask({ state: 'completed', output: { result: 'ok' } }))).html;
+    assert.doesNotMatch(done, /Overdue|Time left/);
+    assert.match(done, /Completed/);
+    assert.match(done, /<details>\s*<summary>Output/);
+    assert.match((await view(aTask({ claimed_at: null }))).html, /Not claimed yet/);
+  });
+
+  test('a strict policy: nothing loads or runs, and the one style is allowed by its hash', async () => {
+    const { html } = await view(aTask());
+    const csp = /<meta http-equiv="Content-Security-Policy" content="([^"]*)">/.exec(html)![1]!;
+    const style = /<style>(.*?)<\/style>/s.exec(html)![1]!;
+    const hash = createHash('sha256').update(style).digest('base64');
+    assert.equal(csp, `default-src 'none'; style-src 'sha256-${hash}'; base-uri 'none'; form-action 'none'`);
+    assert.ok(html.indexOf('Content-Security-Policy') < html.indexOf('<style>'));
+    assert.doesNotMatch(style, /url\(|@import/);
+    assert.doesNotMatch(html, /https?:|http-equiv="refresh"/i, 'no address, and no reload without --watch');
+  });
+
+  test('hostile content in every field is inert text', async () => {
+    const evil = '</script></pre></title><img src=x onerror=alert(1)><a href="https://evil.example">x</a> "q\' &amp; \u202Egnp\u200B\u2066\u{E0041}\uFE0F\u0000\u001b[31m';
+    const { html } = await view(
+      aTask({ from_agent: evil, to_agent: evil, intent: evil, risk: evil, hop: evil, attempts: evil, created_at: evil, claimed_at: evil,
+        input: { [evil]: evil }, output: [evil], title: evil }),
+      [anEvent({ actor: evil, type: evil, created_at: evil, payload: { [evil]: evil } })],
+    );
+    assertSafe(html);
+    assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'), 'shown as text');
+    assert.ok(html.includes('&quot;q&#39; &amp;amp; gnp'), 'quotes and ampersands escaped, hidden characters gone');
+  });
+
+  test('an answer that is not a task, or is another task, writes nothing', async () => {
+    const other = '11111111-6a44-4d1e-9a51-0c7e5c0f1a22';
+    for (const bad of [null, [], 'x', aTask({ id: '../../../etc/passwd' }), aTask({ id: other }), aTask({ id: undefined }),
+      aTask({ state: '<b>' }), aTask({ state: undefined }), aTask({ deadline_at: 'soon' }), aTask({ deadline_at: undefined })]) {
+      serveTask([bad]);
+      const cwd = dir();
+      const r = await cli(['tasks', 'view', ID], { cwd });
+      assert.equal(r.code, 1, JSON.stringify(bad));
+      assertErrorShape(r, 'bad_response', false);
+      assert.deepEqual(readdirSync(cwd), []);
+    }
+    bridge.handler = (req, res) => json(res, 200, req.url!.endsWith('/events') ? { events: 'x' } : { task: aTask() });
+    assertErrorShape(await cli(['tasks', 'view', ID], { cwd: dir() }), 'bad_response', false);
+  });
+
+  test('a token the server echoes is scrubbed from the page, even with hidden characters inside it', async () => {
+    const html = (await view(aTask({ input: { a: TOKEN, b: `${TOKEN.slice(0, 9)}\u200B${TOKEN.slice(9)}` } }))).html;
+    assert.ok(!html.includes(TOKEN));
+    assert.equal(html.split('[REDACTED]').length, 3);
+  });
+
+  test('long content is cut, and the page says so', async () => {
+    const { html } = await view(
+      aTask({ intent: 'i'.repeat(5000), input: { q: 'x'.repeat(900_000) } }),
+      Array.from({ length: 1000 }, (_, n) => anEvent({ id: String(n), type: `e${n}.`, payload: { p: 'y'.repeat(3000) } })),
+    );
+    assert.ok(html.length < 800_000, String(html.length));
+    assert.match(html, /cut: the first 20000 of 900\d{3} characters/);
+    assert.match(html, /800 earlier events are not shown/);
+    assert.ok(html.includes('e999.') && !html.includes('e799.'), 'the newest events stay');
+  });
+
+  test('--out names the file; running again replaces a file this command wrote', async () => {
+    const { cwd } = await view(aTask());
+    const out = join(cwd, 'x.html');
+    serveTask([aTask(), aTask({ state: 'failed' })]);
+    assert.deepEqual((await cli(['tasks', 'view', ID, '--out', out])).json, { file: out, state: 'working' });
+    assert.deepEqual((await cli(['tasks', 'view', ID, '--out', 'x.html'], { cwd })).json, { file: out, state: 'failed' });
+    assert.match(readFileSync(out, 'utf8'), /Failed/);
+  });
+
+  test('a file this command did not write is refused and left alone, unless --force', async () => {
+    serveTask(aTask());
+    const cwd = dir();
+    const path = join(cwd, 'notes.html');
+    // The marker in the middle, as task content could put it, does not make it ours.
+    const mine = `<p>mine</p>\n<!doctype html>\n<!-- agent-bridge: written by "bridge tasks view" -->\n`;
+    for (const content of [mine, '']) {
+      writeFileSync(path, content);
+      const r = await cli(['tasks', 'view', ID, '--out', path]);
+      assert.equal(r.code, 1);
+      assertErrorShape(r, 'file_refused', false);
+      assert.equal(readFileSync(path, 'utf8'), content);
+    }
+    assert.deepEqual(readdirSync(cwd), ['notes.html']);
+    assert.equal((await cli(['tasks', 'view', ID, '--out', path, '--force'])).code, 0);
+    assert.match(readFileSync(path, 'utf8'), /^<!doctype html>/);
+  });
+
+  test('a symlink is refused, dangling or not, and is never written through, even with --force', async () => {
+    serveTask(aTask());
+    const cwd = dir();
+    const target = join(cwd, 'target.html');
+    await cli(['tasks', 'view', ID, '--out', target]);
+    const before = readFileSync(target, 'utf8');
+    const link = join(cwd, FILE);
+    symlinkSync(target, link); // Its target is ours, and that changes nothing.
+    const refused = await cli(['tasks', 'view', ID], { cwd });
+    assertErrorShape(refused, 'file_refused', false);
+    assert.match(refused.stderr, /symlink/);
+    const dangling = join(cwd, 'd.html');
+    symlinkSync(join(cwd, 'missing.html'), dangling);
+    assertErrorShape(await cli(['tasks', 'view', ID, '--out', dangling]), 'file_refused', false);
+    assert.ok(!existsSync(join(cwd, 'missing.html')));
+
+    serveTask(aTask({ state: 'completed' }));
+    assert.equal((await cli(['tasks', 'view', ID, '--force'], { cwd })).code, 0);
+    assert.ok(lstatSync(link).isFile(), 'the link was replaced');
+    assert.equal(readFileSync(target, 'utf8'), before, 'its target was not touched');
+  });
+
+  test('a directory is refused even with --force; a folder that is not there is a plain error', async () => {
+    serveTask(aTask());
+    const cwd = dir();
+    mkdirSync(join(cwd, FILE));
+    assertErrorShape(await cli(['tasks', 'view', ID, '--force'], { cwd }), 'file_refused', false);
+    assertErrorShape(await cli(['tasks', 'view', ID, '--out', join(cwd, 'nope', 'x.html')]), 'write_failed', false);
+  });
+
+  test('bad usage sends nothing', async () => {
+    for (const args of [[], ['7b0f3c5'], [ID, '--interval', '10'], [ID, '--watch', '--interval', '4'], [ID, '--watch', '--interval', '5.5'],
+      [ID, '--watch', '--interval', 'x'], [ID, '--watch', '--interval', '3601'], [ID, '--out', '']]) {
+      assertErrorShape(await cli(['tasks', 'view', ...args]), 'bad_usage', false);
+    }
+    assert.equal(bridge.hits.length, 0);
+  });
+
+  test('a task that is not there exits 5 and writes nothing', async () => {
+    bridge.handler = (_, res) => json(res, 404, { error: 'not_found' });
+    const cwd = dir();
+    const r = await cli(['tasks', 'view', ID], { cwd });
+    assert.equal(r.code, 5);
+    assert.deepEqual(readdirSync(cwd), []);
+  });
+
+  // The same CLI with a shorter second, so a watch is over in moments. Only this copy has it: the real one has no knob.
+  const FAST = join(dir(), 'bridge.mjs');
+  const real = readFileSync(CLI, 'utf8');
+  assert.equal(real.split('const SECOND_MS = 1000;').length, 2);
+  writeFileSync(FAST, real.replace('const SECOND_MS = 1000;', 'const SECOND_MS = 50;'));
+  const watch = (cwd: string) => cli(['tasks', 'view', ID, '--watch', '--interval', '5'], { cwd, file: FAST });
+
+  test('--watch rewrites until the task ends, survives a temporary failure, and only reloads while it is open', async () => {
+    serveTask([aTask(), 503, aTask({ state: 'completed', output: { result: 'done' } })]);
+    const cwd = dir();
+    const run = watch(cwd);
+    const path = join(cwd, FILE);
+    for (let n = 0; n < 100 && !existsSync(path); n++) await new Promise((r) => setTimeout(r, 50));
+    const open = readFileSync(path, 'utf8');
+    assert.match(open, /<meta http-equiv="refresh" content="5">/);
+    assert.ok(open.endsWith('</html>\n'));
+    const r = await run;
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(r.json, { file: path, state: 'completed' });
+    assert.equal(r.stdout.trim().split('\n').length, 1);
+    const closed = readFileSync(path, 'utf8');
+    assert.doesNotMatch(closed, /http-equiv="refresh"/);
+    assert.match(closed, /done/);
+    assert.deepEqual(readdirSync(cwd), [FILE]);
+    assert.equal(bridge.hits.filter((h) => h.url === `/tasks/${ID}`).length, 3, 'one read per interval, and none after the end');
+  });
+
+  test('--watch on a task already closed writes once and ends', async () => {
+    const { r, html } = await view(aTask({ state: 'canceled' }), undefined, ['--watch']);
+    assert.equal(r.json.state, 'canceled');
+    assert.doesNotMatch(html, /http-equiv="refresh"/);
+  });
+
+  test('--watch stops a little after the deadline, whatever later reads say it is, and leaves a page that does not reload', async () => {
+    serveTask([aTask({ deadline_at: at(-5_000) }), aTask({ deadline_at: at(HOUR) })]);
+    const cwd = dir();
+    const r = await watch(cwd);
+    assert.equal(r.code, 0);
+    assert.equal(r.json.state, 'working');
+    assert.match(r.stderr, /past its deadline/);
+    assert.doesNotMatch(readFileSync(join(cwd, FILE), 'utf8'), /http-equiv="refresh"/);
+  });
+
+  test('--watch that loses its access stops with the error, and leaves a page that does not reload', async () => {
+    serveTask(aTask());
+    const serve = bridge.handler;
+    let reads = 0;
+    bridge.handler = (req, res, hit) => {
+      if (req.url === `/tasks/${ID}` && ++reads > 1) return json(res, 403, { error: 'agent_disabled' });
+      serve(req, res, hit);
+    };
+    const cwd = dir();
+    const r = await watch(cwd);
+    assert.equal(r.code, 4);
+    assertErrorShape(r, 'agent_disabled', false);
+    assert.doesNotMatch(readFileSync(join(cwd, FILE), 'utf8'), /http-equiv="refresh"/);
+  });
+
+  // Once the first read names the deadline, nothing may keep the command running past its hard stop: a 6 s grace here.
+  for (const [how, fail] of [
+    ['refuses every connection', (_, res) => res.destroy()],
+    ['never answers', () => {}],
+    ['stalls in the middle of an answer', (_, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.write('{'); }],
+  ] as [string, Handler][]) {
+    test(`--watch ends on its own when the bridge ${how}, with the error and a page that does not reload`, async () => {
+      const cwd = dir();
+      let reads = 0;
+      let stop = 0;
+      bridge.handler = (req, res, hit) => {
+        if (reads > 0 && !req.url!.endsWith('/events')) return fail(req, res, hit);
+        if (req.url!.endsWith('/events')) return json(res, 200, { events: [] });
+        reads++;
+        const deadline = at(-4_500);
+        stop = Date.parse(deadline) + 6_000;
+        json(res, 200, { task: aTask({ deadline_at: deadline }) });
+      };
+      const r = await watch(cwd);
+      const late = Date.now() - stop;
+      assert.equal(r.code, 6);
+      assert.equal(r.json.error.retryable, true);
+      assert.ok(late < 1_000, `ended ${late} ms after the hard stop`);
+      assert.doesNotMatch(readFileSync(join(cwd, FILE), 'utf8'), /http-equiv="refresh"/);
+    });
+  }
 });

@@ -1,6 +1,6 @@
 import type { Hono } from 'hono';
 import { readFileSync } from 'node:fs';
-import { CLI_BOOTSTRAP, fill, ROUTINE_BOOTSTRAP } from './instructions.ts';
+import { CHAT_BOOTSTRAP, CLI_BOOTSTRAP, fill, ROUTINE_BOOTSTRAP } from './instructions.ts';
 
 // Public pages, before auth: they hold no keys, addresses or data and never touch the database.
 // The owner reads them and pastes the text. An agent must not act on them just because it landed here.
@@ -46,11 +46,18 @@ Full guide, with troubleshooting: docs/grok-bot.md in the agent-bridge repositor
    you in its chat. Do not test with the routine's Test button: it sends no task_id, so the run stops and only
    spends quota.
 
+7. Optional, so you can ask other agents from the bot's chat ("ask instinct ..."): ask the bot to save the second
+   text below as its own instructions. It goes in the bot's instructions, not in the routine.
+
 Updates: the routine fetches its working instructions from ${origin}/instructions on every run. After you deploy a
 new version of the bridge, the next run uses it. Paste this text again only if this page says the bootstrap changed.
 
 --- Routine text: copy from here ---
 ${fill(ROUTINE_BOOTSTRAP, origin)}
+--- To here ---
+
+--- Bot instructions (optional): copy from here ---
+${fill(CHAT_BOOTSTRAP, origin)}
 --- To here ---
 `;
 

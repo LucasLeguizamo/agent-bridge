@@ -58,7 +58,7 @@ Each step depends on the previous one. In particular, the Grok webhook goes last
 
 4. **Check:** `pnpm bridge:doctor`, with `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` set so it repeats the `PGRST106` check from step 2. Before the deployment, the dispatcher line can only say there is nothing overdue.
 
-5. **Create the Vercel project** from the repo, with the Hono preset. The entry file is `src/index.ts`, and `vercel.json` sets the region. Load `DATABASE_URL`, `BRIDGE_AGENT_KEYS` and `CRON_SECRET` (`openssl rand -hex 32`) for Production only.
+5. **Create the Vercel project** from the repo, with the Hono preset. The entry file is `src/index.ts`, and `vercel.json` sets the region and `maxDuration` (300 s, on `src/index.ts`, the one function the Hono preset builds from it; the Vercel docs show this key form for presets without an `api/` folder but do not name Hono, so check a preview deploy: a key that matches no function is ignored without an error, and 300 s is also the default with fluid compute, so only `vercel inspect <url> --json` shows whether it applied: look at the function's `timeout`). Load `DATABASE_URL`, `BRIDGE_AGENT_KEYS` and `CRON_SECRET` (`openssl rand -hex 32`) for Production only.
 
 6. **Deployment protection:** Settings > Deployment Protection > Vercel Authentication, with **Standard Protection** or "Only Preview Deployments" if shown. It must cover previews and leave the production domain open: `pg_net` and Grok Bot cannot sign in to Vercel. Never "All Deployments".
 
@@ -108,6 +108,8 @@ Each step depends on the previous one. In particular, the Grok webhook goes last
 2. Migrate **before** deploying, with `pnpm bridge:setup` (or `pnpm db:migrate`): migrations are additive, and the new code may need them.
 3. `git push` to the production branch, or `vercel deploy --prod`.
 4. Repeat the checks from step 7, `pnpm db:smoke` and `pnpm bridge:doctor`. `/health` must show the new version.
+
+`007_asker_wake.sql` must be applied before deploying this version: the code reads its new columns on `bridge.task`, and on the old schema `GET /tasks/:id/answer` answers `500`, and so does `GET /tasks/:id` as the asker of an ended task.
 
 Rules for new migrations: `db/NNN_name.sql`, no hand-written schema names, no `BEGIN` or `COMMIT`, and their own `GRANT`s to `bridge_app`.
 

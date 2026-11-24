@@ -1,6 +1,6 @@
 import type { Pool } from 'pg';
 import { raiseAlert } from './alert.ts';
-import { logBridgeEvent } from './log.ts';
+import { logBridgeEvent, logError } from './log.ts';
 import type { Adapter, Adapters } from './queue.ts';
 import { CLAIM_GRACE_SECONDS } from './tasks.ts';
 
@@ -36,24 +36,98 @@ export function grokConfig(env: Env): GrokConfig | null {
  * Wakes the routine. The body has no signature, so it carries only task_id and the run reads the task over MCP.
  * Documented contract: 200 means a run started, not that it finished or that the Bot's computer is available.
  */
-export function createGrokAdapter(pool: Pool, { url, key }: GrokConfig): Adapter {
+export function createGrokAdapter(pool: Pool, config: GrokConfig): Adapter {
   return {
     async deliver(task, signal) {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ task_id: task.id }),
-        redirect: 'error', // Never replay the bearer key to wherever a redirect points.
-        signal,
-      });
-      await res.body?.cancel();
-      if (!res.ok) throw new Error(`webhook responded ${res.status}`);
+      await postWebhook(config, task.id, signal);
       await pool.query(
         `INSERT INTO event (task_id, actor, type, payload) VALUES ($1, 'bridge', 'grok_run_started', $2::jsonb)`,
         [task.id, JSON.stringify({ attempt: task.attempts })],
       );
     },
   };
+}
+
+/** One POST to the routine webhook. Only task_id travels: the body is not signed. */
+async function postWebhook({ url, key }: GrokConfig, taskId: string, signal: AbortSignal) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ task_id: taskId }),
+    redirect: 'error', // Never replay the bearer key to wherever a redirect points.
+    signal,
+  });
+  await res.body?.cancel();
+  if (!res.ok) throw new Error(`webhook responded ${res.status}`);
+}
+
+const WAKE_QUIET = '90 seconds';
+// A task is open for 24 hours at most, and a breaker pause holds wake-ups for 1 hour more, even renewed once. Counted from
+// creation, since that is what the index has.
+const WAKE_WINDOW = '50 hours';
+const WAKES_PER_PASS = 5;
+// Each send is a paid run, so a pass stops starting new ones when its budget is spent, well inside the function's
+// maxDuration (vercel.json). Worst case: this budget plus one claim, one send and one event, each at its own timeout.
+const WAKE_BUDGET_MS = 30_000;
+const WAKE_TIMEOUT_MS = 10_000;
+// The events that end a task, written by the bridge's own code: complete and fail (any agent can only reach them through
+// finishTask), and the alerts of sweep, nackDelivery and the email adapter. An event an agent can write on its task (a memory log, a
+// refused close) is not one of them, so the receiver cannot hold a wake-up back.
+const END_EVENT = `(e.type IN ('task_completed', 'task_failed')
+  OR (e.type = 'alert' AND e.actor = 'bridge' AND e.payload->>'alert' IN ('deadline_exceeded', 'delivery_exhausted', 'secret_blocked')))`;
+
+export type WakeOptions = { quiet?: string; budgetMs?: number; timeoutMs?: number };
+
+/**
+ * Tells a routine agent that a task it asked for ended, by starting a run with that task_id. The run cannot claim the
+ * task, so it reads the answer and tells its owner (step 3 of the served instructions). Skipped when the asker already
+ * read the answer, while the breaker has sends paused, and until the task ended 90 seconds ago, so an asker that is
+ * still waiting on GET /tasks/:id/answer gets there first. Run it on each dispatcher pass. Returns how many it tried.
+ * One at a time: take one row, send, record, take the next. A pass cut short then loses at most the send in flight, and
+ * that one has an `asker_waking` event with no outcome after it. Rows not yet taken stay due for the next pass.
+ * ponytail: at most once. The row is marked before the send, so a crash or a failed webhook is not retried: every
+ * retry is a paid run, and the owner can still ask the agent to check the task. Add attempts and a backoff, as
+ * sendDelegationResults has, if wake-ups are seen to get lost.
+ */
+export async function wakeAskers(pool: Pool, config: GrokConfig, options: WakeOptions = {}) {
+  const { quiet = WAKE_QUIET, budgetMs = WAKE_BUDGET_MS, timeoutMs = WAKE_TIMEOUT_MS } = options;
+  const started = Date.now();
+  let tried = 0;
+  while (tried < WAKES_PER_PASS && Date.now() - started < budgetMs) {
+    // SKIP LOCKED is what keeps two passes from taking the same row: the lock is held until this statement commits.
+    const { rows: [row] } = await pool.query<{ id: string }>(
+      `WITH due AS (
+         SELECT t.id FROM task t JOIN agent a ON a.id = t.from_agent
+         WHERE t.state IN ('completed', 'failed') AND t.asker_seen_at IS NULL AND t.asker_woken_at IS NULL
+           AND t.created_at > now() - $2::interval
+           AND a.adapter = $1 AND a.enabled
+           AND NOT EXISTS (SELECT 1 FROM adapter_pause p WHERE p.adapter = $1 AND p.paused_until > now())
+           AND NOT EXISTS (SELECT 1 FROM event e WHERE e.task_id = t.id AND e.created_at > now() - $3::interval AND ${END_EVENT})
+         ORDER BY t.created_at LIMIT 1
+         FOR UPDATE OF t SKIP LOCKED
+       ), up AS (
+         UPDATE task t SET asker_woken_at = now() FROM due WHERE t.id = due.id RETURNING t.id
+       ), ev AS (
+         INSERT INTO event (task_id, actor, type, payload) SELECT id, 'bridge', 'asker_waking', '{}'::jsonb FROM up
+       )
+       SELECT id FROM up`,
+      [GROK_ADAPTER, WAKE_WINDOW, quiet],
+    );
+    if (!row) break;
+    tried++;
+    const record = (type: string, payload: object) => pool.query(
+      `INSERT INTO event (task_id, actor, type, payload) VALUES ($1, 'bridge', '${type}', $2::jsonb)`,
+      [row.id, JSON.stringify(payload)],
+    ).catch((e: unknown) => logError('asker wake event', e)); // The rest of the batch still goes.
+    try {
+      await postWebhook(config, row.id, AbortSignal.timeout(timeoutMs));
+    } catch (e) {
+      await record('asker_wake_failed', { error: (e instanceof Error ? e.message : 'unknown').slice(0, 200) });
+      continue;
+    }
+    await record('asker_woken', {});
+  }
+  return tried;
 }
 
 /**

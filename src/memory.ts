@@ -245,6 +245,7 @@ export async function memoryEvents(pool: Pool, agent: string, input: z.input<typ
     `SELECT e.id, e.task_id, e.actor, e.type, e.payload - 'error' AS payload, e.created_at
      FROM event e LEFT JOIN task t ON t.id = e.task_id
      WHERE ($2::uuid IS NULL OR e.task_id = $2)
+       AND (NOT starts_with(e.type, 'asker_') OR t.from_agent = $1)
        AND (t.from_agent = $1 OR (t.to_agent = $1 AND t.attempts > 0)
             OR (e.task_id IS NULL AND (e.type LIKE 'agent.%' OR e.type = 'memory_write')))
      ORDER BY e.id DESC LIMIT $3`, [agent, q.task_id ?? null, q.limit]);
